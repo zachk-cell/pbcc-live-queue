@@ -55,9 +55,12 @@
   .pill.oos{color:#ffb020;border-color:#4a3a12;background:#2a2410}
   /* Collapsible groups */
   .group{border:1px solid var(--line);border-radius:12px;margin-bottom:12px;overflow:hidden;background:var(--panel)}
-  .ghead{display:flex;align-items:center;gap:10px;padding:11px 14px;cursor:pointer;user-select:none}
+  .ghead{display:flex;align-items:center;gap:10px;padding:14px;min-height:50px;cursor:pointer;user-select:none;border-radius:11px}
   .ghead:hover{background:#1b2433}
-  .gcaret{color:var(--muted);font-size:11px;transition:transform .15s;display:inline-block}
+  .ghead:active{background:#202a3a}
+  .gcaret{color:var(--muted);font-size:13px;transition:transform .15s;display:inline-block;width:14px;text-align:center}
+  .gedit{color:var(--muted);cursor:pointer;font-size:13px;padding:2px 6px;border-radius:6px;opacity:.6}
+  .gedit:hover{color:var(--accent);background:var(--panel2);opacity:1}
   .group.collapsed .gcaret{transform:rotate(-90deg)}
   .gname{font-weight:700;font-size:14px}
   .gmeta{color:var(--muted);font-size:12px;font-weight:400}
@@ -129,7 +132,7 @@
     <span class="status" id="refreshStatus"></span>
     <span class="stat" id="catcount" style="margin-left:auto"></span>
   </div>
-  <p class="sub" style="margin:0 0 12px"><b>Add a category</b> above (or type one in an item's Category box), then <b>drag the ⠿ handle</b> on any item to move it into a category or reorder it, or the ⠿ handle on a <b>category header</b> to reorder the categories themselves. Out-of-stock items are gathered automatically. Tick <b>fixed</b> on an item to enter a flat profit instead of cost. Click a group header to collapse or expand.</p>
+  <p class="sub" style="margin:0 0 12px"><b>Add a category</b> above (or type one in an item's Category box), then <b>drag the ⠿ handle</b> on any item to move it into a category or reorder it, or the ⠿ handle on a <b>category header</b> to reorder the categories themselves. Out-of-stock items are gathered automatically. Tick <b>fixed</b> on an item to enter a flat profit instead of cost. Rename a category with its <b>✎</b>. Click anywhere on a group header to collapse or expand.</p>
 
   <datalist id="groupList"></datalist>
   <div id="tableWrap"><div class="empty">Loading…</div></div>
@@ -233,7 +236,7 @@
     Array.prototype.forEach.call(wrap.querySelectorAll('.group'), function(el){
       var head = el.querySelector('.ghead');
       if(head) head.addEventListener('click', function(ev){
-        if(ev.target.closest('.grm')||ev.target.closest('.gdh')||ev.target.closest('.gname-edit')) return;
+        if(ev.target.closest('.grm')||ev.target.closest('.gdh')||ev.target.closest('.gname-edit')||ev.target.closest('.gedit')) return;
         toggleGroup(el.getAttribute('data-key'));
       });
     });
@@ -348,17 +351,35 @@
     }catch(e){ /* ignore */ }
   }
 
+  // Click the pencil to turn a locked category title into an input (locked otherwise).
+  function startRename(icon, ev){
+    if(ev) ev.stopPropagation();
+    var head = icon.closest('.ghead');
+    var span = head && head.querySelector('.gname');
+    if(!span || head.querySelector('.gname-edit')) return;
+    var cur = span.textContent;
+    var inp = document.createElement('input');
+    inp.className = 'gname gname-edit';
+    inp.value = cur; inp.setAttribute('data-old', cur);
+    inp.onclick = function(e){ e.stopPropagation(); };
+    inp.onkeydown = function(e){ catNameKey(e, inp); };
+    inp.onblur = function(){ commitRename(inp); };
+    span.replaceWith(inp);
+    inp.focus(); inp.select();
+  }
   function catNameKey(e, inp){ if(e && e.key==='Enter'){ e.preventDefault(); inp.blur(); } else if(e && e.key==='Escape'){ inp.value = inp.getAttribute('data-old')||''; inp.blur(); } }
+  var _renaming = false;
   async function commitRename(inp){
+    if(_renaming) return; _renaming = true;
     var oldName = inp.getAttribute('data-old')||'';
     var newName = (inp.value||'').trim();
-    if(!newName){ inp.value = oldName; return; }
-    if(newName === oldName) return;
-    inp.setAttribute('data-old', newName);
+    if(!newName || newName === oldName){ renderCatalog(); _renaming=false; return; } // revert to locked title
     try{
       var res = await fetch('/api/catalog/groups', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ rename:{ from:oldName, to:newName } }) }).then(function(r){ return r.json(); });
       if(res.ok){ groups = res.groups||groups; catalog = res.catalog||catalog; renderCatalog(); loadProfit(); }
-    }catch(e){ /* ignore */ }
+      else renderCatalog();
+    }catch(e){ renderCatalog(); }
+    _renaming = false;
   }
 
   function groupHtml(g){
@@ -368,9 +389,8 @@
     var rm = (g.kind==='cat') ? '<span class="grm" title="Remove this category" onclick="removeCategory(\''+esc(g.gname).replace(/'/g,"&#39;")+'\')">✕</span>' : '';
     var gdh = (g.kind==='cat') ? '<span class="gdh" draggable="true" title="Drag to reorder categories">⠿</span>' : '';
     var rows = g.items.length ? g.items.map(rowHtml).join('') : '<tr class="gempty"><td colspan="5">Drag items here</td></tr>';
-    var nameHtml = (g.kind==='cat')
-      ? '<input class="gname gname-edit" value="'+esc(g.gname)+'" data-old="'+esc(g.gname)+'" title="Click to rename" onclick="event.stopPropagation()" onkeydown="catNameKey(event,this)" onblur="commitRename(this)">'
-      : '<span class="gname">'+esc(g.label)+'</span>';
+    var nameHtml = '<span class="gname">'+esc(g.label)+'</span>'
+      + (g.kind==='cat' ? '<span class="gedit" title="Rename category" onclick="startRename(this,event)">✎</span>' : '');
     return '<div class="group '+(isColl?'collapsed':'')+(droppable?' droppable':'')+(g.kind==='cat'?' iscat':'')+'" data-key="'+esc(g.key)+'" data-gname="'+esc(g.gname)+'">'+
       '<div class="ghead">'+gdh+'<span class="gcaret">▾</span>'+nameHtml+sub+rm+'<span class="gcount">'+g.items.length+'</span></div>'+
       '<div class="gbody"><table><thead><tr><th class="dhh"></th><th>Item</th><th>Category</th><th class="r">Sell price</th><th class="r">Cost / Fixed profit</th></tr></thead><tbody>'+rows+'</tbody></table></div>'+
