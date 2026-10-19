@@ -66,6 +66,9 @@
   .group.collapsed .gbody{display:none}
   .gbody th{position:static;background:transparent}
   .group.droppable.dragover{outline:2px dashed var(--accent);outline-offset:-2px}
+  .group.iscat.groupdrop{outline:2px solid var(--accent);outline-offset:-2px}
+  .gdh{color:var(--muted);cursor:grab;user-select:none;font-size:13px;margin-right:2px}
+  .gdh:active{cursor:grabbing}
   .newcat{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:8px 11px;border-radius:9px;font-size:13px;min-width:190px}
   /* Drag handle + row drop indicator */
   td.dh{width:22px;color:var(--muted);cursor:grab;text-align:center;user-select:none}
@@ -114,7 +117,7 @@
     <span class="status" id="refreshStatus"></span>
     <span class="stat" id="catcount" style="margin-left:auto"></span>
   </div>
-  <p class="sub" style="margin:0 0 12px"><b>Add a category</b> above (or type one in an item's Category box), then <b>drag the ⠿ handle</b> on any item to move it into a category or reorder it. Out-of-stock items are gathered automatically. Tick <b>fixed</b> on an item to enter a flat profit instead of cost. Click a group header to collapse or expand.</p>
+  <p class="sub" style="margin:0 0 12px"><b>Add a category</b> above (or type one in an item's Category box), then <b>drag the ⠿ handle</b> on any item to move it into a category or reorder it, or the ⠿ handle on a <b>category header</b> to reorder the categories themselves. Out-of-stock items are gathered automatically. Tick <b>fixed</b> on an item to enter a flat profit instead of cost. Click a group header to collapse or expand.</p>
 
   <datalist id="groupList"></datalist>
   <div id="tableWrap"><div class="empty">Loading…</div></div>
@@ -132,6 +135,7 @@
   var dirtyGroup = {};   // skuId -> group string
   var dirtyFixed = {};   // skuId -> fixed-profit string ('' = clear / not fixed)
   var draggingSku = null;
+  var draggingGroup = null; // category name being dragged to reorder
   var collapsed = loadCollapsed(); // { groupKey: true }
 
   function loadCollapsed(){ try{ return JSON.parse(localStorage.getItem('pbccProfitCollapsed')||'{}')||{}; }catch(e){ return {}; } }
@@ -213,12 +217,24 @@
   function wireGroups(wrap){
     Array.prototype.forEach.call(wrap.querySelectorAll('.group'), function(el){
       var head = el.querySelector('.ghead');
-      if(head) head.addEventListener('click', function(ev){ if(ev.target.closest('.grm')) return; toggleGroup(el.getAttribute('data-key')); });
-      // Drop target: category + ungrouped groups accept dragged items.
-      if(el.classList.contains('droppable')){
-        el.addEventListener('dragover', function(ev){ ev.preventDefault(); el.classList.add('dragover'); });
-        el.addEventListener('dragleave', function(ev){ if(ev.target===el) el.classList.remove('dragover'); });
-        el.addEventListener('drop', function(ev){ ev.preventDefault(); el.classList.remove('dragover'); onDrop(el.getAttribute('data-gname'), null); });
+      if(head) head.addEventListener('click', function(ev){ if(ev.target.closest('.grm')||ev.target.closest('.gdh')) return; toggleGroup(el.getAttribute('data-key')); });
+      // Group-level drop: reorder categories (when dragging a category header) OR
+      // accept a dragged item (when dragging an item into a droppable group).
+      el.addEventListener('dragover', function(ev){
+        if(draggingGroup && el.classList.contains('iscat')){ ev.preventDefault(); el.classList.add('groupdrop'); }
+        else if(draggingSku && el.classList.contains('droppable')){ ev.preventDefault(); el.classList.add('dragover'); }
+      });
+      el.addEventListener('dragleave', function(ev){ if(ev.target===el){ el.classList.remove('dragover','groupdrop'); } });
+      el.addEventListener('drop', function(ev){
+        ev.preventDefault(); el.classList.remove('dragover','groupdrop');
+        if(draggingGroup && el.classList.contains('iscat')){ onGroupDrop(el.getAttribute('data-gname')); }
+        else if(draggingSku && el.classList.contains('droppable')){ onDrop(el.getAttribute('data-gname'), null); }
+      });
+      // Category header drag handle → reorder categories.
+      var gdh = el.querySelector('.gdh');
+      if(gdh){
+        gdh.addEventListener('dragstart', function(ev){ draggingGroup = el.getAttribute('data-gname'); try{ ev.dataTransfer.effectAllowed='move'; ev.dataTransfer.setData('text/plain', draggingGroup); }catch(e){} });
+        gdh.addEventListener('dragend', function(){ draggingGroup=null; document.querySelectorAll('.groupdrop,.dragover,.rowdrop').forEach(function(n){ n.classList.remove('groupdrop','dragover','rowdrop'); }); });
       }
     });
     // Row-level drop (insert before a specific row) + handle drag start.
@@ -238,9 +254,10 @@
     var droppable = (g.kind==='cat' || g.kind==='ungrouped');
     var sub = (g.kind==='oos') ? ' <span class="gmeta">(auto)</span>' : (g.kind==='archived' ? ' <span class="gmeta">(delisted — kept for history)</span>' : '');
     var rm = (g.kind==='cat') ? '<span class="grm" title="Remove this category" onclick="removeCategory(\''+esc(g.gname).replace(/'/g,"&#39;")+'\')">✕</span>' : '';
+    var gdh = (g.kind==='cat') ? '<span class="gdh" draggable="true" title="Drag to reorder categories">⠿</span>' : '';
     var rows = g.items.length ? g.items.map(rowHtml).join('') : '<tr class="gempty"><td colspan="5">Drag items here</td></tr>';
-    return '<div class="group '+(isColl?'collapsed':'')+(droppable?' droppable':'')+'" data-key="'+esc(g.key)+'" data-gname="'+esc(g.gname)+'">'+
-      '<div class="ghead"><span class="gcaret">▾</span><span class="gname">'+esc(g.label)+'</span>'+sub+rm+'<span class="gcount">'+g.items.length+'</span></div>'+
+    return '<div class="group '+(isColl?'collapsed':'')+(droppable?' droppable':'')+(g.kind==='cat'?' iscat':'')+'" data-key="'+esc(g.key)+'" data-gname="'+esc(g.gname)+'">'+
+      '<div class="ghead">'+gdh+'<span class="gcaret">▾</span><span class="gname">'+esc(g.label)+'</span>'+sub+rm+'<span class="gcount">'+g.items.length+'</span></div>'+
       '<div class="gbody"><table><thead><tr><th class="dhh"></th><th>Item</th><th>Category</th><th class="r">Sell price</th><th class="r">Cost / Fixed profit</th></tr></thead><tbody>'+rows+'</tbody></table></div>'+
     '</div>';
   }
@@ -277,6 +294,22 @@
     if(chk.checked){ fxin.style.display=''; cost.style.display='none'; fxin.focus(); dirtyFixed[sku] = fxin.value || ''; }
     else { fxin.style.display='none'; cost.style.display=''; dirtyFixed[sku] = ''; }
     markDirty();
+  }
+
+  async function onGroupDrop(targetGname){
+    if(!draggingGroup) return;
+    var dg = draggingGroup; draggingGroup = null;
+    if(dg === targetGname) return;
+    var cats = [];
+    Array.prototype.forEach.call(document.querySelectorAll('.group.iscat'), function(el){ cats.push(el.getAttribute('data-gname')); });
+    var from = cats.indexOf(dg); if(from < 0) return;
+    cats.splice(from, 1);
+    var to = cats.indexOf(targetGname);
+    if(to < 0) cats.push(dg); else cats.splice(to, 0, dg);
+    try{
+      var res = await fetch('/api/catalog/groups', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ order:cats }) }).then(function(r){ return r.json(); });
+      if(res.ok){ groups = res.groups||groups; catalog = res.catalog||catalog; renderCatalog(); }
+    }catch(e){ /* ignore */ }
   }
 
   async function onDrop(gname, beforeSku){

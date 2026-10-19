@@ -332,12 +332,13 @@ export class QueueEngine extends EventEmitter {
     return true;
   }
 
-  /** Reorder the category registry to match the given names (missing ones kept). */
+  /** Reorder the category registry to match the given names. Names not yet in the
+   *  registry (e.g. ad-hoc categories typed on an item) are added in the given
+   *  order, and any existing registry names omitted from the list are appended. */
   setCatalogGroupOrder(names) {
     if (!Array.isArray(names)) return false;
-    const have = new Set(this.catalogGroups);
     const next = [];
-    for (const n of names) { const s = String(n); if (have.has(s) && !next.includes(s)) next.push(s); }
+    for (const n of names) { const s = String(n == null ? '' : n).trim().slice(0, 60); if (s && !next.includes(s)) next.push(s); }
     for (const g of this.catalogGroups) if (!next.includes(g)) next.push(g);
     this.catalogGroups = next;
     this._persistCatalog();
