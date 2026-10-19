@@ -442,6 +442,7 @@ app.post('/api/catalog/groups', requireAuth, (req, res) => {
   const b = req.body || {};
   if (b.add != null) queue.addCatalogGroup(b.add);
   if (b.remove != null) queue.removeCatalogGroup(b.remove);
+  if (b.rename && b.rename.from != null && b.rename.to != null) queue.renameCatalogGroup(b.rename.from, b.rename.to);
   if (Array.isArray(b.order)) queue.setCatalogGroupOrder(b.order);
   res.json({ ok: true, groups: queue.catalogGroups, catalog: queue.catalogList() });
 });

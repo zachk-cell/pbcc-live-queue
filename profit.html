@@ -65,10 +65,22 @@
   .gbody{border-top:1px solid var(--line)}
   .group.collapsed .gbody{display:none}
   .gbody th{position:static;background:transparent}
-  .group.droppable.dragover{outline:2px dashed var(--accent);outline-offset:-2px}
-  .group.iscat.groupdrop{outline:2px solid var(--accent);outline-offset:-2px}
   .gdh{color:var(--muted);cursor:grab;user-select:none;font-size:13px;margin-right:2px}
   .gdh:active{cursor:grabbing}
+  /* Editable category name */
+  input.gname-edit{background:transparent;border:1px solid transparent;color:var(--text);font-weight:700;font-size:14px;
+    padding:3px 6px;border-radius:7px;min-width:60px;max-width:46vw}
+  input.gname-edit:hover{border-color:var(--line);background:var(--panel2)}
+  input.gname-edit:focus{outline:none;border-color:var(--accent);background:var(--panel2)}
+  /* Drag feedback: dimmed source + a clear insertion line */
+  tr.dragging{opacity:.4}
+  .group.gdragging{opacity:.5}
+  .group.dropactive{background:rgba(79,140,255,.05);outline:1px solid var(--accent);outline-offset:-1px;border-radius:12px}
+  tr.ins-before td{box-shadow:inset 0 3px 0 var(--accent)}
+  tr.ins-after td{box-shadow:inset 0 -3px 0 var(--accent)}
+  .gbody.ins-empty{box-shadow:inset 0 0 0 2px var(--accent)}
+  .group.iscat.gins-before{box-shadow:inset 0 3px 0 var(--accent)}
+  .group.iscat.gins-after{box-shadow:inset 0 -3px 0 var(--accent)}
   .newcat{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:8px 11px;border-radius:9px;font-size:13px;min-width:190px}
   /* Drag handle + row drop indicator */
   td.dh{width:22px;color:var(--muted);cursor:grab;text-align:center;user-select:none}
@@ -214,39 +226,139 @@
     wireGroups(wrap);
   }
 
+  var pendingGroup = null, pendingBefore = null, pendingGroupBefore = null;
+
   function wireGroups(wrap){
+    // Header collapse toggle (ignore the handle, remove-✕ and the name editor).
     Array.prototype.forEach.call(wrap.querySelectorAll('.group'), function(el){
       var head = el.querySelector('.ghead');
-      if(head) head.addEventListener('click', function(ev){ if(ev.target.closest('.grm')||ev.target.closest('.gdh')) return; toggleGroup(el.getAttribute('data-key')); });
-      // Group-level drop: reorder categories (when dragging a category header) OR
-      // accept a dragged item (when dragging an item into a droppable group).
-      el.addEventListener('dragover', function(ev){
-        if(draggingGroup && el.classList.contains('iscat')){ ev.preventDefault(); el.classList.add('groupdrop'); }
-        else if(draggingSku && el.classList.contains('droppable')){ ev.preventDefault(); el.classList.add('dragover'); }
+      if(head) head.addEventListener('click', function(ev){
+        if(ev.target.closest('.grm')||ev.target.closest('.gdh')||ev.target.closest('.gname-edit')) return;
+        toggleGroup(el.getAttribute('data-key'));
       });
-      el.addEventListener('dragleave', function(ev){ if(ev.target===el){ el.classList.remove('dragover','groupdrop'); } });
-      el.addEventListener('drop', function(ev){
-        ev.preventDefault(); el.classList.remove('dragover','groupdrop');
-        if(draggingGroup && el.classList.contains('iscat')){ onGroupDrop(el.getAttribute('data-gname')); }
-        else if(draggingSku && el.classList.contains('droppable')){ onDrop(el.getAttribute('data-gname'), null); }
-      });
-      // Category header drag handle → reorder categories.
-      var gdh = el.querySelector('.gdh');
-      if(gdh){
-        gdh.addEventListener('dragstart', function(ev){ draggingGroup = el.getAttribute('data-gname'); try{ ev.dataTransfer.effectAllowed='move'; ev.dataTransfer.setData('text/plain', draggingGroup); }catch(e){} });
-        gdh.addEventListener('dragend', function(){ draggingGroup=null; document.querySelectorAll('.groupdrop,.dragover,.rowdrop').forEach(function(n){ n.classList.remove('groupdrop','dragover','rowdrop'); }); });
-      }
     });
-    // Row-level drop (insert before a specific row) + handle drag start.
-    Array.prototype.forEach.call(wrap.querySelectorAll('tr[data-sku]'), function(tr){
-      tr.addEventListener('dragover', function(ev){ if(draggingSku){ ev.preventDefault(); ev.stopPropagation(); tr.classList.add('rowdrop'); } });
-      tr.addEventListener('dragleave', function(){ tr.classList.remove('rowdrop'); });
-      tr.addEventListener('drop', function(ev){ ev.preventDefault(); ev.stopPropagation(); tr.classList.remove('rowdrop'); onDrop(tr.getAttribute('data-gname'), tr.getAttribute('data-sku')); });
-    });
+    // Item drag handles.
     Array.prototype.forEach.call(wrap.querySelectorAll('.dh[draggable="true"]'), function(h){
-      h.addEventListener('dragstart', function(ev){ draggingSku = h.getAttribute('data-sku'); try{ ev.dataTransfer.effectAllowed='move'; ev.dataTransfer.setData('text/plain', draggingSku); }catch(e){} });
-      h.addEventListener('dragend', function(){ draggingSku=null; document.querySelectorAll('.dragover,.rowdrop').forEach(function(n){ n.classList.remove('dragover','rowdrop'); }); });
+      h.addEventListener('dragstart', function(ev){
+        draggingSku = h.getAttribute('data-sku'); var tr=h.closest('tr'); if(tr) tr.classList.add('dragging');
+        try{ ev.dataTransfer.effectAllowed='move'; ev.dataTransfer.setData('text/plain', draggingSku); }catch(e){}
+      });
+      h.addEventListener('dragend', endDrag);
     });
+    // Category header drag handles.
+    Array.prototype.forEach.call(wrap.querySelectorAll('.gdh[draggable="true"]'), function(h){
+      h.addEventListener('dragstart', function(ev){
+        var el=h.closest('.group'); draggingGroup = el.getAttribute('data-gname'); el.classList.add('gdragging');
+        try{ ev.dataTransfer.effectAllowed='move'; ev.dataTransfer.setData('text/plain', draggingGroup); }catch(e){}
+      });
+      h.addEventListener('dragend', endDrag);
+    });
+    // One dispatcher on the container handles all dragover/drop, so drop targets are
+    // forgiving (midpoint-based) and the top/bottom edges of every list just work.
+    if(!wrap._dndWired){
+      wrap.addEventListener('dragover', onWrapDragOver);
+      wrap.addEventListener('drop', onWrapDrop);
+      wrap._dndWired = true;
+    }
+  }
+
+  function clearIndicators(){
+    document.querySelectorAll('.ins-before,.ins-after').forEach(function(n){ n.classList.remove('ins-before','ins-after'); });
+    document.querySelectorAll('.gins-before,.gins-after,.dropactive,.ins-empty').forEach(function(n){ n.classList.remove('gins-before','gins-after','dropactive','ins-empty'); });
+  }
+  // The row to insert BEFORE given a pointer Y (by row midpoints); null = append.
+  function rowAfter(gbody, y){
+    var rows = [].slice.call(gbody.querySelectorAll('tr[data-sku]:not(.dragging)'));
+    var best=null, bo=-Infinity;
+    for(var i=0;i<rows.length;i++){ var r=rows[i].getBoundingClientRect(); var off=y-r.top-r.height/2; if(off<0 && off>bo){ bo=off; best=rows[i]; } }
+    return best;
+  }
+  // The droppable group under (or nearest to) a pointer Y.
+  function groupUnder(y){
+    var els=[].slice.call(document.querySelectorAll('#tableWrap .group.droppable'));
+    if(!els.length) return null;
+    for(var i=0;i<els.length;i++){ var r=els[i].getBoundingClientRect(); if(y>=r.top && y<=r.bottom) return els[i]; }
+    var best=null,bd=Infinity;
+    els.forEach(function(el){ var r=el.getBoundingClientRect(); var d=Math.min(Math.abs(y-r.top),Math.abs(y-r.bottom)); if(d<bd){bd=d;best=el;} });
+    return best;
+  }
+  // The category group to insert BEFORE given a pointer Y; null = append.
+  function groupAfter(y){
+    var cats=[].slice.call(document.querySelectorAll('#tableWrap .group.iscat'));
+    var best=null,bo=-Infinity;
+    cats.forEach(function(el){ if(el.classList.contains('gdragging')) return; var r=el.getBoundingClientRect(); var off=y-r.top-r.height/2; if(off<0 && off>bo){ bo=off; best=el; } });
+    return best;
+  }
+
+  function onWrapDragOver(ev){
+    if(draggingSku){
+      ev.preventDefault(); clearIndicators();
+      var target = groupUnder(ev.clientY);
+      if(!target){ pendingGroup=null; pendingBefore=null; return; }
+      target.classList.add('dropactive');
+      pendingGroup = target.getAttribute('data-gname');
+      if(target.classList.contains('collapsed')){ pendingBefore=null; return; } // append to collapsed group
+      var gbody = target.querySelector('.gbody');
+      var after = rowAfter(gbody, ev.clientY);
+      pendingBefore = after ? after.getAttribute('data-sku') : null;
+      if(after) after.classList.add('ins-before');
+      else { var rows=gbody.querySelectorAll('tr[data-sku]'); if(rows.length) rows[rows.length-1].classList.add('ins-after'); else gbody.classList.add('ins-empty'); }
+    } else if(draggingGroup){
+      ev.preventDefault(); clearIndicators();
+      var afterG = groupAfter(ev.clientY);
+      pendingGroupBefore = afterG ? afterG.getAttribute('data-gname') : null;
+      if(afterG) afterG.classList.add('gins-before');
+      else { var cats=document.querySelectorAll('#tableWrap .group.iscat'); if(cats.length) cats[cats.length-1].classList.add('gins-after'); }
+    }
+  }
+
+  function onWrapDrop(ev){
+    ev.preventDefault();
+    var sku=draggingSku, grp=draggingGroup, pg=pendingGroup, pb=pendingBefore, pgb=pendingGroupBefore;
+    endDrag();
+    if(sku){ moveItem(sku, pg, pb); }
+    else if(grp){ reorderGroup(grp, pgb); }
+  }
+
+  function endDrag(){
+    draggingSku=null; draggingGroup=null; pendingGroup=null; pendingBefore=null; pendingGroupBefore=null;
+    document.querySelectorAll('.dragging,.gdragging').forEach(function(n){ n.classList.remove('dragging','gdragging'); });
+    clearIndicators();
+  }
+
+  async function moveItem(sku, gname, beforeSku){
+    if(!sku) return;
+    try{
+      var res = await fetch('/api/catalog/move', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ skuId:sku, group:(gname||''), beforeSkuId:beforeSku }) }).then(function(r){ return r.json(); });
+      if(res.ok){ catalog = res.catalog||catalog; groups = res.groups||groups; renderCatalog(); loadProfit(); }
+    }catch(e){ /* ignore */ }
+  }
+
+  async function reorderGroup(dg, targetGname){
+    if(!dg || dg===targetGname) return;
+    var cats = [];
+    Array.prototype.forEach.call(document.querySelectorAll('#tableWrap .group.iscat'), function(el){ cats.push(el.getAttribute('data-gname')); });
+    var from = cats.indexOf(dg); if(from < 0) return;
+    cats.splice(from, 1);
+    var to = targetGname!=null ? cats.indexOf(targetGname) : -1;
+    if(to < 0) cats.push(dg); else cats.splice(to, 0, dg);
+    try{
+      var res = await fetch('/api/catalog/groups', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ order:cats }) }).then(function(r){ return r.json(); });
+      if(res.ok){ groups = res.groups||groups; catalog = res.catalog||catalog; renderCatalog(); }
+    }catch(e){ /* ignore */ }
+  }
+
+  function catNameKey(e, inp){ if(e && e.key==='Enter'){ e.preventDefault(); inp.blur(); } else if(e && e.key==='Escape'){ inp.value = inp.getAttribute('data-old')||''; inp.blur(); } }
+  async function commitRename(inp){
+    var oldName = inp.getAttribute('data-old')||'';
+    var newName = (inp.value||'').trim();
+    if(!newName){ inp.value = oldName; return; }
+    if(newName === oldName) return;
+    inp.setAttribute('data-old', newName);
+    try{
+      var res = await fetch('/api/catalog/groups', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ rename:{ from:oldName, to:newName } }) }).then(function(r){ return r.json(); });
+      if(res.ok){ groups = res.groups||groups; catalog = res.catalog||catalog; renderCatalog(); loadProfit(); }
+    }catch(e){ /* ignore */ }
   }
 
   function groupHtml(g){
@@ -256,8 +368,11 @@
     var rm = (g.kind==='cat') ? '<span class="grm" title="Remove this category" onclick="removeCategory(\''+esc(g.gname).replace(/'/g,"&#39;")+'\')">✕</span>' : '';
     var gdh = (g.kind==='cat') ? '<span class="gdh" draggable="true" title="Drag to reorder categories">⠿</span>' : '';
     var rows = g.items.length ? g.items.map(rowHtml).join('') : '<tr class="gempty"><td colspan="5">Drag items here</td></tr>';
+    var nameHtml = (g.kind==='cat')
+      ? '<input class="gname gname-edit" value="'+esc(g.gname)+'" data-old="'+esc(g.gname)+'" title="Click to rename" onclick="event.stopPropagation()" onkeydown="catNameKey(event,this)" onblur="commitRename(this)">'
+      : '<span class="gname">'+esc(g.label)+'</span>';
     return '<div class="group '+(isColl?'collapsed':'')+(droppable?' droppable':'')+(g.kind==='cat'?' iscat':'')+'" data-key="'+esc(g.key)+'" data-gname="'+esc(g.gname)+'">'+
-      '<div class="ghead">'+gdh+'<span class="gcaret">▾</span><span class="gname">'+esc(g.label)+'</span>'+sub+rm+'<span class="gcount">'+g.items.length+'</span></div>'+
+      '<div class="ghead">'+gdh+'<span class="gcaret">▾</span>'+nameHtml+sub+rm+'<span class="gcount">'+g.items.length+'</span></div>'+
       '<div class="gbody"><table><thead><tr><th class="dhh"></th><th>Item</th><th>Category</th><th class="r">Sell price</th><th class="r">Cost / Fixed profit</th></tr></thead><tbody>'+rows+'</tbody></table></div>'+
     '</div>';
   }
@@ -294,32 +409,6 @@
     if(chk.checked){ fxin.style.display=''; cost.style.display='none'; fxin.focus(); dirtyFixed[sku] = fxin.value || ''; }
     else { fxin.style.display='none'; cost.style.display=''; dirtyFixed[sku] = ''; }
     markDirty();
-  }
-
-  async function onGroupDrop(targetGname){
-    if(!draggingGroup) return;
-    var dg = draggingGroup; draggingGroup = null;
-    if(dg === targetGname) return;
-    var cats = [];
-    Array.prototype.forEach.call(document.querySelectorAll('.group.iscat'), function(el){ cats.push(el.getAttribute('data-gname')); });
-    var from = cats.indexOf(dg); if(from < 0) return;
-    cats.splice(from, 1);
-    var to = cats.indexOf(targetGname);
-    if(to < 0) cats.push(dg); else cats.splice(to, 0, dg);
-    try{
-      var res = await fetch('/api/catalog/groups', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ order:cats }) }).then(function(r){ return r.json(); });
-      if(res.ok){ groups = res.groups||groups; catalog = res.catalog||catalog; renderCatalog(); }
-    }catch(e){ /* ignore */ }
-  }
-
-  async function onDrop(gname, beforeSku){
-    if(!draggingSku) return;
-    var sku = draggingSku; draggingSku = null;
-    try{
-      var res = await fetch('/api/catalog/move', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ skuId:sku, group:(gname||''), beforeSkuId:beforeSku }) });
-      var j = await res.json();
-      if(j.ok){ catalog = j.catalog||catalog; groups = j.groups||groups; renderCatalog(); loadProfit(); }
-    }catch(e){ /* ignore */ }
   }
 
   function toggleGroup(key){

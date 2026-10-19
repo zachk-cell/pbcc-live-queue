@@ -332,6 +332,27 @@ export class QueueEngine extends EventEmitter {
     return true;
   }
 
+  /** Rename a category: update the registry (keeping its position) and move every
+   *  item assigned to the old name over to the new one. If the new name already
+   *  exists, the two categories merge. */
+  renameCatalogGroup(oldName, newName) {
+    const o = String(oldName == null ? '' : oldName).trim();
+    const n = String(newName == null ? '' : newName).trim().slice(0, 60);
+    if (!o || !n || o === n) return false;
+    const idx = this.catalogGroups.indexOf(o);
+    if (this.catalogGroups.includes(n)) {
+      if (idx >= 0) this.catalogGroups.splice(idx, 1); // merge: drop the old slot
+    } else if (idx >= 0) {
+      this.catalogGroups[idx] = n; // rename in place
+    } else {
+      this.catalogGroups.push(n);
+    }
+    for (const c of Object.values(this.catalog)) if ((c.group || '') === o) c.group = n;
+    this._persistCatalog();
+    this.emit('change', { reason: 'catalog-group-rename' });
+    return true;
+  }
+
   /** Reorder the category registry to match the given names. Names not yet in the
    *  registry (e.g. ad-hoc categories typed on an item) are added in the given
    *  order, and any existing registry names omitted from the list are appended. */
