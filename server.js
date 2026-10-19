@@ -434,8 +434,25 @@ function sendCsv(res, filename, records, cancelled = [], unfulfilled = []) {
 }
 // Past-stream summaries for the history page.
 // ---------- Profit page: catalog + per-item cost + current-stream profit ----------
-// The stored catalog (persisted; does not hit TikTok).
-app.get('/api/catalog', requireAuth, (_req, res) => res.json({ ok: true, catalog: queue.catalogList() }));
+// The stored catalog (persisted; does not hit TikTok) + the category registry.
+app.get('/api/catalog', requireAuth, (_req, res) => res.json({ ok: true, catalog: queue.catalogList(), groups: queue.catalogGroups }));
+
+// Manage the category registry: body { add } / { remove } / { order:[...] }.
+app.post('/api/catalog/groups', requireAuth, (req, res) => {
+  const b = req.body || {};
+  if (b.add != null) queue.addCatalogGroup(b.add);
+  if (b.remove != null) queue.removeCatalogGroup(b.remove);
+  if (Array.isArray(b.order)) queue.setCatalogGroupOrder(b.order);
+  res.json({ ok: true, groups: queue.catalogGroups, catalog: queue.catalogList() });
+});
+
+// Drag-and-drop move: body { skuId, group, beforeSkuId }. group optional (reassigns
+// category); beforeSkuId optional (null = end of that category).
+app.post('/api/catalog/move', requireAuth, (req, res) => {
+  const b = req.body || {};
+  const ok = queue.moveCatalogItem(b.skuId, b.group, b.beforeSkuId);
+  res.json({ ok: ok, catalog: queue.catalogList(), groups: queue.catalogGroups });
+});
 
 // Re-pull the live TikTok catalog and merge it (add new, update prices, archive
 // anything no longer listed — costs preserved). Falls back to the sold-items list
@@ -454,14 +471,15 @@ app.post('/api/catalog/refresh', requireAuth, async (_req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// Save per-item costs and/or group assignments:
-// body { costs: { [skuId]: cost }, groups: { [skuId]: groupName } } (either optional).
+// Save per-item costs, group assignments, and/or fixed-profit settings:
+// body { costs:{[sku]:cost}, groups:{[sku]:name}, fixed:{[sku]:perUnitProfit|null} }.
 app.post('/api/item-costs', requireAuth, (req, res) => {
   const b = req.body || {};
-  const costs = b.costs || (b.groups ? {} : b); // bare body = costs map (back-compat)
+  const costs = b.costs || (b.groups || b.fixed ? {} : b); // bare body = costs map (back-compat)
   const nCosts = queue.setItemCosts(costs);
   const nGroups = b.groups ? queue.setItemGroups(b.groups) : 0;
-  res.json({ ok: true, updated: nCosts, groupsUpdated: nGroups });
+  const nFixed = b.fixed ? queue.setItemFixed(b.fixed) : 0;
+  res.json({ ok: true, updated: nCosts, groupsUpdated: nGroups, fixedUpdated: nFixed });
 });
 
 // Tentative profit for the current live stream.

@@ -65,6 +65,22 @@
   .gbody{border-top:1px solid var(--line)}
   .group.collapsed .gbody{display:none}
   .gbody th{position:static;background:transparent}
+  .group.droppable.dragover{outline:2px dashed var(--accent);outline-offset:-2px}
+  .newcat{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:8px 11px;border-radius:9px;font-size:13px;min-width:190px}
+  /* Drag handle + row drop indicator */
+  td.dh{width:22px;color:var(--muted);cursor:grab;text-align:center;user-select:none}
+  td.dh[draggable="true"]:active{cursor:grabbing}
+  th.dhh{width:22px}
+  tr.rowdrop td{box-shadow:inset 0 2px 0 var(--accent)}
+  tr.gempty td{color:var(--muted);text-align:center;font-style:italic;padding:14px}
+  .grm{color:var(--muted);cursor:pointer;font-size:12px;padding:0 6px;border-radius:6px}
+  .grm:hover{color:var(--bad);background:var(--panel2)}
+  /* Fixed-profit controls */
+  td.costcell{white-space:nowrap}
+  .fx{font-size:11px;color:var(--muted);margin-right:6px;cursor:pointer;user-select:none}
+  .fx input{vertical-align:middle;margin-right:3px}
+  input.fxin{width:78px;background:var(--panel2);border:1px solid var(--warn);color:var(--text);padding:7px 9px;border-radius:8px;font-size:13px;text-align:right}
+  input.fxin.dirty{border-color:var(--accent)}
   .prod{font-weight:600} .var{color:var(--muted);font-size:12.5px}
   .empty{color:var(--muted);text-align:center;padding:40px 20px;border:1px dashed var(--line);border-radius:12px}
   .toggle{color:var(--accent);cursor:pointer;font-size:12.5px;user-select:none}
@@ -89,14 +105,16 @@
   </div>
 
   <div class="bar">
-    <button class="primary" id="refreshBtn" onclick="refreshCatalog()">↻ Refresh catalog</button>
+    <input id="newCat" class="newcat" placeholder="New category name…" onkeydown="newCatKey(event)" />
+    <button class="primary" id="addCatBtn" onclick="addCategory()">+ Add category</button>
+    <button id="refreshBtn" onclick="refreshCatalog()">↻ Refresh catalog</button>
     <button id="recalcBtn" onclick="loadProfit()">↻ Recalculate profit</button>
     <button id="expandBtn" onclick="setAllCollapsed(false)">⊕ Expand all</button>
     <button id="collapseBtn" onclick="setAllCollapsed(true)">⊖ Collapse all</button>
     <span class="status" id="refreshStatus"></span>
     <span class="stat" id="catcount" style="margin-left:auto"></span>
   </div>
-  <p class="sub" style="margin:0 0 12px">Type a <b>category</b> next to any item (or pick an existing one) to group it. Out-of-stock items are gathered automatically. Click a group header to collapse or expand it.</p>
+  <p class="sub" style="margin:0 0 12px"><b>Add a category</b> above (or type one in an item's Category box), then <b>drag the ⠿ handle</b> on any item to move it into a category or reorder it. Out-of-stock items are gathered automatically. Tick <b>fixed</b> on an item to enter a flat profit instead of cost. Click a group header to collapse or expand.</p>
 
   <datalist id="groupList"></datalist>
   <div id="tableWrap"><div class="empty">Loading…</div></div>
@@ -109,13 +127,16 @@
 
 <script>
   var catalog = [];
-  var dirtyCost = {};   // skuId -> cost string
-  var dirtyGroup = {};  // skuId -> group string
+  var groups = [];       // category registry (ordered) — includes empty categories
+  var dirtyCost = {};    // skuId -> cost string
+  var dirtyGroup = {};   // skuId -> group string
+  var dirtyFixed = {};   // skuId -> fixed-profit string ('' = clear / not fixed)
+  var draggingSku = null;
   var collapsed = loadCollapsed(); // { groupKey: true }
 
   function loadCollapsed(){ try{ return JSON.parse(localStorage.getItem('pbccProfitCollapsed')||'{}')||{}; }catch(e){ return {}; } }
   function saveCollapsed(){ try{ localStorage.setItem('pbccProfitCollapsed', JSON.stringify(collapsed)); }catch(e){} }
-  function dirtyCount(){ return Object.keys(dirtyCost).length + Object.keys(dirtyGroup).length; }
+  function dirtyCount(){ return Object.keys(dirtyCost).length + Object.keys(dirtyGroup).length + Object.keys(dirtyFixed).length; }
   function markDirty(){ var n=dirtyCount(); document.getElementById('saveBtn').disabled = n===0; document.getElementById('saveStatus').textContent = n ? (n+' unsaved change'+(n===1?'':'s')) : ''; }
 
   function money(n){ var x = Number(n||0); return (x<0?'-$':'$') + Math.abs(x).toFixed(2); }
@@ -127,8 +148,29 @@
       if(!res.ok){ location.href='{{ADMIN}}'; return; }
       var j = await res.json();
       catalog = j.catalog || [];
+      groups = j.groups || [];
       renderCatalog();
     }catch(e){ document.getElementById('tableWrap').innerHTML = '<div class="empty">Could not load the catalog. Try refreshing.</div>'; }
+  }
+
+  async function addCategory(){
+    var inp = document.getElementById('newCat');
+    var name = (inp.value||'').trim();
+    if(!name) { inp.focus(); return; }
+    try{
+      var res = await fetch('/api/catalog/groups', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ add:name }) });
+      var j = await res.json();
+      if(j.ok){ groups = j.groups||groups; catalog = j.catalog||catalog; inp.value=''; collapsed['cat:'+name]=false; saveCollapsed(); renderCatalog(); }
+    }catch(e){ /* ignore */ }
+  }
+  function newCatKey(e){ if(e && e.key==='Enter'){ e.preventDefault(); addCategory(); } }
+
+  async function removeCategory(name){
+    try{
+      var res = await fetch('/api/catalog/groups', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ remove:name }) });
+      var j = await res.json();
+      if(j.ok){ groups = j.groups||groups; catalog = j.catalog||catalog; renderCatalog(); loadProfit(); }
+    }catch(e){ /* ignore */ }
   }
 
   function isOOS(c){ return c.stock != null && Number(c.stock) <= 0; }
@@ -136,46 +178,70 @@
   function renderCatalog(){
     var wrap = document.getElementById('tableWrap');
     if(!catalog.length){ wrap.innerHTML = '<div class="empty">No items yet.<br><br>Click <b>Refresh catalog</b> to pull your store items from TikTok.</div>'; document.getElementById('catcount').textContent=''; return; }
-    // Category suggestions for the datalist.
-    var catNames = {};
+    // Datalist = registry categories + any ad-hoc ones in use.
+    var catNames = {}; groups.forEach(function(n){ catNames[n]=1; });
     catalog.forEach(function(c){ var g=(c.group||'').trim(); if(g) catNames[g]=1; });
-    var names = Object.keys(catNames).sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
-    document.getElementById('groupList').innerHTML = names.map(function(n){ return '<option value="'+esc(n)+'">'; }).join('');
-    // Bucket items into groups.
+    var nameList = Object.keys(catNames).sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
+    document.getElementById('groupList').innerHTML = nameList.map(function(n){ return '<option value="'+esc(n)+'">'; }).join('');
+    // Bucket items (preserving catalog order, which is the manual drag order).
     var active = catalog.filter(function(c){ return !c.archived; });
     var archived = catalog.filter(function(c){ return c.archived; });
     var buckets = {};
-    function push(key,label,kind,c){ if(!buckets[key]){ buckets[key]={key:key,label:label,kind:kind,items:[]}; } buckets[key].items.push(c); }
+    function ensure(key,label,kind){ if(!buckets[key]) buckets[key]={key:key,label:label,kind:kind,gname:(kind==='cat'?label:''),items:[]}; return buckets[key]; }
+    // Pre-create every registry category so empty ones still show as drop targets.
+    groups.forEach(function(n){ ensure('cat:'+n, n, 'cat'); });
     active.forEach(function(c){
-      if(isOOS(c)){ push('oos','Out of Stock','oos',c); return; }
+      if(isOOS(c)){ ensure('oos','Out of Stock','oos').items.push(c); return; }
       var g=(c.group||'').trim();
-      if(g) push('cat:'+g, g, 'cat', c); else push('ungrouped','Ungrouped','ungrouped',c);
+      if(g) ensure('cat:'+g, g, 'cat').items.push(c); else ensure('ungrouped','Ungrouped','ungrouped').items.push(c);
     });
-    archived.forEach(function(c){ push('archived','Archived','archived',c); });
-    // Order: categories A→Z, then Ungrouped, Out of Stock, Archived.
-    var keys = Object.keys(buckets);
-    var catKeys = keys.filter(function(k){ return k.indexOf('cat:')===0; }).sort(function(a,b){ return a.slice(4).toLowerCase().localeCompare(b.slice(4).toLowerCase()); });
-    var order = catKeys.concat(['ungrouped','oos','archived'].filter(function(k){ return buckets[k]; }));
+    archived.forEach(function(c){ ensure('archived','Archived','archived').items.push(c); });
+    // Order: registry categories (in registry order), then ad-hoc categories A→Z,
+    // then Ungrouped, Out of Stock, Archived.
+    var order = [];
+    groups.forEach(function(n){ order.push('cat:'+n); });
+    Object.keys(buckets).filter(function(k){ return k.indexOf('cat:')===0 && order.indexOf(k)<0; })
+      .sort(function(a,b){ return a.slice(4).toLowerCase().localeCompare(b.slice(4).toLowerCase()); })
+      .forEach(function(k){ order.push(k); });
+    ['ungrouped','oos','archived'].forEach(function(k){ if(buckets[k]) order.push(k); });
     var oosN = buckets.oos ? buckets.oos.items.length : 0;
-    var archN = archived.length;
-    document.getElementById('catcount').textContent = active.length + ' active item' + (active.length===1?'':'s') + (oosN? ' · '+oosN+' out of stock':'') + (archN? ' · '+archN+' archived':'');
+    document.getElementById('catcount').textContent = active.length + ' active item' + (active.length===1?'':'s') + (oosN? ' · '+oosN+' out of stock':'') + (archived.length? ' · '+archived.length+' archived':'');
     wrap.innerHTML = order.map(function(k){ return groupHtml(buckets[k]); }).join('');
-    // Wire header toggles (avoids escaping group names into inline handlers).
+    wireGroups(wrap);
+  }
+
+  function wireGroups(wrap){
     Array.prototype.forEach.call(wrap.querySelectorAll('.group'), function(el){
       var head = el.querySelector('.ghead');
-      if(head) head.addEventListener('click', function(){ toggleGroup(el.getAttribute('data-key')); });
+      if(head) head.addEventListener('click', function(ev){ if(ev.target.closest('.grm')) return; toggleGroup(el.getAttribute('data-key')); });
+      // Drop target: category + ungrouped groups accept dragged items.
+      if(el.classList.contains('droppable')){
+        el.addEventListener('dragover', function(ev){ ev.preventDefault(); el.classList.add('dragover'); });
+        el.addEventListener('dragleave', function(ev){ if(ev.target===el) el.classList.remove('dragover'); });
+        el.addEventListener('drop', function(ev){ ev.preventDefault(); el.classList.remove('dragover'); onDrop(el.getAttribute('data-gname'), null); });
+      }
+    });
+    // Row-level drop (insert before a specific row) + handle drag start.
+    Array.prototype.forEach.call(wrap.querySelectorAll('tr[data-sku]'), function(tr){
+      tr.addEventListener('dragover', function(ev){ if(draggingSku){ ev.preventDefault(); ev.stopPropagation(); tr.classList.add('rowdrop'); } });
+      tr.addEventListener('dragleave', function(){ tr.classList.remove('rowdrop'); });
+      tr.addEventListener('drop', function(ev){ ev.preventDefault(); ev.stopPropagation(); tr.classList.remove('rowdrop'); onDrop(tr.getAttribute('data-gname'), tr.getAttribute('data-sku')); });
+    });
+    Array.prototype.forEach.call(wrap.querySelectorAll('.dh[draggable="true"]'), function(h){
+      h.addEventListener('dragstart', function(ev){ draggingSku = h.getAttribute('data-sku'); try{ ev.dataTransfer.effectAllowed='move'; ev.dataTransfer.setData('text/plain', draggingSku); }catch(e){} });
+      h.addEventListener('dragend', function(){ draggingSku=null; document.querySelectorAll('.dragover,.rowdrop').forEach(function(n){ n.classList.remove('dragover','rowdrop'); }); });
     });
   }
 
   function groupHtml(g){
-    // OOS and Archived default collapsed; everything else expanded — unless the
-    // user has set a preference for this group.
     var isColl = collapsed.hasOwnProperty(g.key) ? !!collapsed[g.key] : (g.kind==='oos' || g.kind==='archived');
+    var droppable = (g.kind==='cat' || g.kind==='ungrouped');
     var sub = (g.kind==='oos') ? ' <span class="gmeta">(auto)</span>' : (g.kind==='archived' ? ' <span class="gmeta">(delisted — kept for history)</span>' : '');
-    var rows = g.items.map(rowHtml).join('');
-    return '<div class="group '+(isColl?'collapsed':'')+'" data-key="'+esc(g.key)+'">'+
-      '<div class="ghead"><span class="gcaret">▾</span><span class="gname">'+esc(g.label)+'</span>'+sub+'<span class="gcount">'+g.items.length+'</span></div>'+
-      '<div class="gbody"><table><thead><tr><th>Item</th><th>Category</th><th class="r">Sell price</th><th class="r">Your cost</th></tr></thead><tbody>'+rows+'</tbody></table></div>'+
+    var rm = (g.kind==='cat') ? '<span class="grm" title="Remove this category" onclick="removeCategory(\''+esc(g.gname).replace(/'/g,"&#39;")+'\')">✕</span>' : '';
+    var rows = g.items.length ? g.items.map(rowHtml).join('') : '<tr class="gempty"><td colspan="5">Drag items here</td></tr>';
+    return '<div class="group '+(isColl?'collapsed':'')+(droppable?' droppable':'')+'" data-key="'+esc(g.key)+'" data-gname="'+esc(g.gname)+'">'+
+      '<div class="ghead"><span class="gcaret">▾</span><span class="gname">'+esc(g.label)+'</span>'+sub+rm+'<span class="gcount">'+g.items.length+'</span></div>'+
+      '<div class="gbody"><table><thead><tr><th class="dhh"></th><th>Item</th><th>Category</th><th class="r">Sell price</th><th class="r">Cost / Fixed profit</th></tr></thead><tbody>'+rows+'</tbody></table></div>'+
     '</div>';
   }
 
@@ -183,17 +249,45 @@
     var price = (c.price!=null && Number(c.price)>0) ? money(c.price) : '<span class="var">—</span>';
     var costVal = (c.cost!=null) ? Number(c.cost) : '';
     var groupVal = esc((c.group||'').trim());
+    var isFixed = !!c.fixed;
+    var fixedVal = (c.fixedProfit!=null) ? Number(c.fixedProfit) : '';
     var badge = isOOS(c) ? '<span class="pill oos">0 in stock</span>' : (c.archived ? '<span class="pill">archived</span>' : '');
-    return '<tr'+(c.archived?' class="arch"':'')+'>'+
+    var canDrag = !c.archived && !isOOS(c);
+    var handle = canDrag ? '<td class="dh" draggable="true" data-sku="'+esc(c.skuId)+'" title="Drag to move / reorder">⠿</td>' : '<td class="dh"></td>';
+    var costCell =
+      '<label class="fx"><input type="checkbox" class="fxchk" data-sku="'+esc(c.skuId)+'" '+(isFixed?'checked':'')+' onchange="onFixedChk(this)"> fixed</label>'+
+      '<input class="fxin num" inputmode="decimal" data-sku="'+esc(c.skuId)+'" value="'+(isFixed?fixedVal:'')+'" placeholder="profit" style="'+(isFixed?'':'display:none')+'" oninput="onFixed(this)">'+
+      '<input class="cost num" inputmode="decimal" data-sku="'+esc(c.skuId)+'" value="'+costVal+'" placeholder="cost" style="'+(isFixed?'display:none':'')+'" oninput="onCost(this)">';
+    return '<tr data-sku="'+esc(c.skuId)+'" data-gname="'+groupVal+'"'+(c.archived?' class="arch"':'')+'>'+
+      handle+
       '<td><span class="prod">'+esc(c.product||c.name||'Item')+'</span>'+badge+(c.variant?'<div class="var">'+esc(c.variant)+'</div>':'')+'</td>'+
       '<td><input class="grp" list="groupList" data-sku="'+esc(c.skuId)+'" value="'+groupVal+'" placeholder="—" oninput="onGroup(this)"></td>'+
       '<td class="r num">'+price+'</td>'+
-      '<td class="r"><input class="cost num" inputmode="decimal" data-sku="'+esc(c.skuId)+'" value="'+costVal+'" placeholder="0.00" oninput="onCost(this)"></td>'+
+      '<td class="r costcell">'+costCell+'</td>'+
     '</tr>';
   }
 
   function onCost(el){ dirtyCost[el.getAttribute('data-sku')] = el.value; el.classList.add('dirty'); markDirty(); }
   function onGroup(el){ dirtyGroup[el.getAttribute('data-sku')] = el.value; el.classList.add('dirty'); markDirty(); }
+  function onFixed(el){ dirtyFixed[el.getAttribute('data-sku')] = el.value; el.classList.add('dirty'); markDirty(); }
+  function onFixedChk(chk){
+    var sku = chk.getAttribute('data-sku');
+    var cell = chk.closest('.costcell');
+    var fxin = cell.querySelector('.fxin'), cost = cell.querySelector('.cost');
+    if(chk.checked){ fxin.style.display=''; cost.style.display='none'; fxin.focus(); dirtyFixed[sku] = fxin.value || ''; }
+    else { fxin.style.display='none'; cost.style.display=''; dirtyFixed[sku] = ''; }
+    markDirty();
+  }
+
+  async function onDrop(gname, beforeSku){
+    if(!draggingSku) return;
+    var sku = draggingSku; draggingSku = null;
+    try{
+      var res = await fetch('/api/catalog/move', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ skuId:sku, group:(gname||''), beforeSkuId:beforeSku }) });
+      var j = await res.json();
+      if(j.ok){ catalog = j.catalog||catalog; groups = j.groups||groups; renderCatalog(); loadProfit(); }
+    }catch(e){ /* ignore */ }
+  }
 
   function toggleGroup(key){
     collapsed[key] = !collapsed[key]; saveCollapsed();
@@ -209,19 +303,21 @@
   }
 
   async function save(){
-    var costKeys = Object.keys(dirtyCost), grpKeys = Object.keys(dirtyGroup);
-    if(!costKeys.length && !grpKeys.length) return;
+    var costKeys = Object.keys(dirtyCost), grpKeys = Object.keys(dirtyGroup), fxKeys = Object.keys(dirtyFixed);
+    if(!costKeys.length && !grpKeys.length && !fxKeys.length) return;
     var costs = {}; costKeys.forEach(function(k){ var v=(dirtyCost[k]||'').trim(); costs[k]=(v==='')?'':Number(v); });
-    var groups = {}; grpKeys.forEach(function(k){ groups[k]=(dirtyGroup[k]||'').trim(); });
+    var grp = {}; grpKeys.forEach(function(k){ grp[k]=(dirtyGroup[k]||'').trim(); });
+    var fixed = {}; fxKeys.forEach(function(k){ var v=(dirtyFixed[k]||'').trim(); fixed[k]=(v==='')?'':Number(v); });
     var btn = document.getElementById('saveBtn'); btn.disabled = true;
     document.getElementById('saveStatus').textContent = 'Saving…';
     try{
-      var res = await fetch('/api/item-costs', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ costs:costs, groups:groups }) });
+      var res = await fetch('/api/item-costs', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ costs:costs, groups:grp, fixed:fixed }) });
       var j = await res.json();
       if(!j.ok) throw new Error('save failed');
       costKeys.forEach(function(k){ var c=catalog.find(function(x){return String(x.skuId)===String(k);}); if(c){ var v=(dirtyCost[k]||'').trim(); c.cost=(v==='')?null:Number(v); } });
       grpKeys.forEach(function(k){ var c=catalog.find(function(x){return String(x.skuId)===String(k);}); if(c){ c.group=(dirtyGroup[k]||'').trim(); } });
-      dirtyCost = {}; dirtyGroup = {};
+      fxKeys.forEach(function(k){ var c=catalog.find(function(x){return String(x.skuId)===String(k);}); if(c){ var v=(dirtyFixed[k]||'').trim(); if(v===''){ c.fixed=false; c.fixedProfit=null; } else { c.fixed=true; c.fixedProfit=Number(v); } } });
+      dirtyCost = {}; dirtyGroup = {}; dirtyFixed = {};
       document.getElementById('saveStatus').textContent = 'Saved ✓';
       renderCatalog(); loadProfit();
     }catch(e){ document.getElementById('saveStatus').textContent = 'Could not save — try again.'; btn.disabled=false; }
@@ -253,12 +349,16 @@
       netEl.className = 'val ' + (p.net>=0?'pos':'neg');
       document.getElementById('netLbl').textContent = p.live ? 'tentative net profit · current live stream' : 'tentative net profit · stream not live (current orders)';
       var feePct = Math.round((p.feeRate||0.06)*100);
+      var hasFixed = Number(p.fixedProfitTotal)>0 || Number(p.fixedRevenueEst)>0;
       var rowsHtml = ''+
         row('Revenue (buyers paid)', money(p.gross), '') +
         row('Less sales tax', money(-p.tax), 'minus') +
         row('Pre-tax sales', money(p.preTax), 'total') +
+        (hasFixed ? row('Less fixed-profit item sales', money(-(p.fixedRevenueEst||0)), 'minus') : '') +
+        (hasFixed ? row('Regular pre-tax sales', money(p.regularPreTax), 'total') : '') +
         row('Cost of goods', money(-p.cogs), 'minus') +
         row(feePct+'% TikTok fee (pre-tax)', money(-p.fee), 'minus') +
+        (hasFixed ? row('Fixed-profit items', money(p.fixedProfitTotal||0), '') : '') +
         row('Shipping ($'+(p.shipPerBuyer||5)+' × '+p.buyerCount+' buyer'+(p.buyerCount===1?'':'s')+')', money(-p.shipping), 'minus') +
         row('Net profit', money(p.net), 'total');
       document.getElementById('brk').innerHTML = rowsHtml;

@@ -62,6 +62,8 @@ export class QueueEngine extends EventEmitter {
     // and items no longer listed marked archived (NOT deleted) so their cost and
     // any historical profit math are preserved.
     this.catalog = {};
+    this.catalogGroups = []; // ordered registry of category names (persists empty groups)
+    this.catalogOrder = [];  // ordered skuIds for manual drag-ordering within groups
     this._ensureDataDir();
     this._load();
     this._seedFromEnv();
@@ -99,11 +101,21 @@ export class QueueEngine extends EventEmitter {
     try {
       if (fs.existsSync(CATALOG_FILE)) {
         const obj = JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf8'));
-        if (obj && typeof obj === 'object' && !Array.isArray(obj)) this.catalog = obj;
+        if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+          // New format: { items, groups, order }. Old format: a bare items map.
+          if (obj.items && typeof obj.items === 'object') {
+            this.catalog = obj.items;
+            this.catalogGroups = Array.isArray(obj.groups) ? obj.groups : [];
+            this.catalogOrder = Array.isArray(obj.order) ? obj.order : [];
+          } else {
+            this.catalog = obj;
+          }
+        }
       }
     } catch (e) {
       console.warn('[queue] could not load catalog:', e.message);
     }
+    this._ensureCatalogOrder();
     try {
       if (fs.existsSync(STATE_FILE)) {
         const arr = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
@@ -273,10 +285,94 @@ export class QueueEngine extends EventEmitter {
 
   _persistCatalog() {
     try {
-      fs.writeFileSync(CATALOG_FILE, JSON.stringify(this.catalog));
+      fs.writeFileSync(CATALOG_FILE, JSON.stringify({
+        items: this.catalog,
+        groups: this.catalogGroups,
+        order: this.catalogOrder,
+      }));
     } catch (e) {
       console.warn('[queue] catalog persist failed:', e.message);
     }
+  }
+
+  /** Keep catalogOrder a complete, de-duped list of every catalog skuId. Unknown
+   *  ids are dropped; any item missing from the order is appended (archived last,
+   *  then by product/variant) so drag-ordering always has a full, stable base. */
+  _ensureCatalogOrder() {
+    if (!Array.isArray(this.catalogOrder)) this.catalogOrder = [];
+    const seen = new Set();
+    const ordered = [];
+    for (const id of this.catalogOrder) { const s = String(id); if (this.catalog[s] && !seen.has(s)) { seen.add(s); ordered.push(s); } }
+    const missing = Object.values(this.catalog)
+      .filter((c) => !seen.has(String(c.skuId)))
+      .sort((a, b) => (Number(!!a.archived) - Number(!!b.archived))
+        || String(a.product || '').localeCompare(String(b.product || ''))
+        || String(a.variant || '').localeCompare(String(b.variant || '')))
+      .map((c) => String(c.skuId));
+    this.catalogOrder = ordered.concat(missing);
+  }
+
+  /** Add a category to the registry (so an empty group persists as a drop target). */
+  addCatalogGroup(name) {
+    const n = String(name == null ? '' : name).trim().slice(0, 60);
+    if (!n) return false;
+    if (!this.catalogGroups.includes(n)) this.catalogGroups.push(n);
+    this._persistCatalog();
+    this.emit('change', { reason: 'catalog-group-add' });
+    return true;
+  }
+
+  /** Remove a category: drop it from the registry and un-assign any items in it. */
+  removeCatalogGroup(name) {
+    const n = String(name == null ? '' : name).trim();
+    this.catalogGroups = this.catalogGroups.filter((g) => g !== n);
+    for (const c of Object.values(this.catalog)) if ((c.group || '') === n) c.group = '';
+    this._persistCatalog();
+    this.emit('change', { reason: 'catalog-group-remove' });
+    return true;
+  }
+
+  /** Reorder the category registry to match the given names (missing ones kept). */
+  setCatalogGroupOrder(names) {
+    if (!Array.isArray(names)) return false;
+    const have = new Set(this.catalogGroups);
+    const next = [];
+    for (const n of names) { const s = String(n); if (have.has(s) && !next.includes(s)) next.push(s); }
+    for (const g of this.catalogGroups) if (!next.includes(g)) next.push(g);
+    this.catalogGroups = next;
+    this._persistCatalog();
+    this.emit('change', { reason: 'catalog-group-order' });
+    return true;
+  }
+
+  /** Drag-and-drop move: set an item's category (optional) and reposition it in the
+   *  global order — before `beforeSkuId`, or at the end of its (new) category. */
+  moveCatalogItem(skuId, group, beforeSkuId) {
+    const id = String(skuId);
+    const e = this.catalog[id];
+    if (!e) return false;
+    if (group !== undefined && group !== null) {
+      const g = String(group).trim().slice(0, 60);
+      e.group = g;
+      if (g && !this.catalogGroups.includes(g)) this.catalogGroups.push(g);
+    }
+    this._ensureCatalogOrder();
+    this.catalogOrder = this.catalogOrder.filter((x) => x !== id);
+    const before = beforeSkuId != null ? String(beforeSkuId) : '';
+    if (before && this.catalogOrder.includes(before)) {
+      this.catalogOrder.splice(this.catalogOrder.indexOf(before), 0, id);
+    } else {
+      // Append after the last item currently in the same category (active, in stock).
+      let insertAt = this.catalogOrder.length;
+      for (let i = this.catalogOrder.length - 1; i >= 0; i--) {
+        const c = this.catalog[this.catalogOrder[i]];
+        if (c && !c.archived && (c.group || '') === (e.group || '')) { insertAt = i + 1; break; }
+      }
+      this.catalogOrder.splice(insertAt, 0, id);
+    }
+    this._persistCatalog();
+    this.emit('change', { reason: 'catalog-move' });
+    return true;
   }
 
   // ── Product catalog + cost ledger (profit page) ─────────────────────────────
@@ -317,6 +413,8 @@ export class QueueEngine extends EventEmitter {
           price: Number(it.price) || 0,
           currency: it.currency || '',
           cost: null,
+          fixed: false,        // fixed-profit item (bypasses the cost/fee margin math)
+          fixedProfit: null,   // flat profit per unit when fixed
           group: '', // user-assigned category (preserved across refreshes)
           stock: (it.stock !== undefined ? it.stock : null),
           archived: false,
@@ -331,6 +429,7 @@ export class QueueEngine extends EventEmitter {
     for (const id of Object.keys(this.catalog)) {
       if (!liveIds.has(id) && !this.catalog[id].archived) { this.catalog[id].archived = true; archived++; }
     }
+    this._ensureCatalogOrder();
     this._persistCatalog();
     this.emit('change', { reason: 'catalog-refresh' });
     const all = Object.values(this.catalog);
@@ -363,13 +462,28 @@ export class QueueEngine extends EventEmitter {
     return [...seen.values()];
   }
 
-  /** The stored catalog as a sorted array (active first, then by product/variant). */
+  /** The stored catalog as an array in the manual (drag) order. */
   catalogList() {
-    return Object.values(this.catalog).sort((a, b) => {
-      if (!!a.archived !== !!b.archived) return a.archived ? 1 : -1;
-      const p = String(a.product || '').localeCompare(String(b.product || ''));
-      return p !== 0 ? p : String(a.variant || '').localeCompare(String(b.variant || ''));
-    });
+    this._ensureCatalogOrder();
+    return this.catalogOrder.map((id) => this.catalog[id]).filter(Boolean);
+  }
+
+  /** Set fixed-profit flags/amounts from { [skuId]: perUnitProfit|null }. A number
+   *  marks the item fixed-profit at that per-unit amount; null/'' clears it. */
+  setItemFixed(map) {
+    if (!map || typeof map !== 'object') return 0;
+    let n = 0;
+    for (const [id, v] of Object.entries(map)) {
+      const e = this.catalog[String(id)];
+      if (!e) continue;
+      const p = (v === '' || v == null) ? null : Number(v);
+      if (p != null && isFinite(p)) { e.fixed = true; e.fixedProfit = p; }
+      else { e.fixed = false; e.fixedProfit = null; }
+      n++;
+    }
+    this._persistCatalog();
+    this.emit('change', { reason: 'catalog-fixed' });
+    return n;
   }
 
   /** Set per-item costs from { [skuId]: cost }. Empty/invalid clears the cost. */
@@ -430,6 +544,7 @@ export class QueueEngine extends EventEmitter {
     // Current-stream orders = everything in memory, minus whole-order cancels.
     const orders = [...this.orders.values()].filter((o) => !o.cancelRequested);
     let gross = 0, tax = 0, cogs = 0, missingCostUnits = 0;
+    let fixedProfitTotal = 0, fixedRevenueEst = 0, fixedUnits = 0;
     const buyers = new Set();
     const unmatched = new Map();
     for (const o of orders) {
@@ -440,19 +555,32 @@ export class QueueEngine extends EventEmitter {
         if (it.cancelled) continue;
         const qty = Number(it.qty) || 1;
         const e = resolve(it);
-        if (e && e.cost != null) cogs += e.cost * qty;
-        else { missingCostUnits += qty; const k = it.name || '(unnamed)'; unmatched.set(k, (unmatched.get(k) || 0) + qty); }
+        if (e && e.fixed && e.fixedProfit != null) {
+          // Fixed-profit item: its profit is the flat per-unit amount. Its estimated
+          // sale (catalog price) is pulled OUT of the margin math so it isn't also
+          // counted via revenue − cost − fee.
+          fixedProfitTotal += Number(e.fixedProfit) * qty;
+          fixedRevenueEst += (Number(e.price) || 0) * qty;
+          fixedUnits += qty;
+        } else if (e && e.cost != null) {
+          cogs += e.cost * qty;
+        } else {
+          missingCostUnits += qty; const k = it.name || '(unnamed)'; unmatched.set(k, (unmatched.get(k) || 0) + qty);
+        }
       }
     }
     const preTax = gross - tax;
-    const fee = preTax * TIKTOK_FEE_RATE;
+    // Regular (non-fixed) pre-tax sales carry the cost + fee math; fixed items don't.
+    const regularPreTax = preTax - fixedRevenueEst;
+    const fee = Math.max(0, regularPreTax) * TIKTOK_FEE_RATE;
     const shipping = buyers.size * SHIP_PER_BUYER;
-    const net = preTax - cogs - fee - shipping;
+    const net = regularPreTax - cogs - fee - shipping + fixedProfitTotal;
     return {
       live: this.live,
       orderCount: orders.length,
       buyerCount: buyers.size,
       gross, tax, preTax,
+      fixedRevenueEst, regularPreTax, fixedProfitTotal, fixedUnits,
       cogs, fee, feeRate: TIKTOK_FEE_RATE,
       shipping, shipPerBuyer: SHIP_PER_BUYER,
       net,
@@ -460,7 +588,7 @@ export class QueueEngine extends EventEmitter {
       unmatched: [...unmatched.entries()].map(([name, qty]) => ({ name, qty }))
         .sort((a, b) => b.qty - a.qty).slice(0, 50),
       catalogActive: Object.values(this.catalog).filter((c) => !c.archived).length,
-      costedActive: Object.values(this.catalog).filter((c) => !c.archived && c.cost != null).length,
+      costedActive: Object.values(this.catalog).filter((c) => !c.archived && (c.cost != null || (c.fixed && c.fixedProfit != null))).length,
     };
   }
 
