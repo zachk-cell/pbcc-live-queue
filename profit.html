@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Profit calculator — PBCC Live Queue</title>
+<style>
+  :root{--bg:#0f1115;--panel:#171a21;--panel2:#1d212b;--line:#272c38;--text:#e8ebf2;
+    --muted:#8b93a7;--accent:#4f8cff;--done:#25c26e;--warn:#ffb020;--bad:#ff6a6a;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased}
+  header{position:sticky;top:0;z-index:5;background:linear-gradient(180deg,#141824,#0f1115);
+    border-bottom:1px solid var(--line);padding:14px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:17px;margin:0}
+  a.back{color:var(--accent);text-decoration:none;font-size:13px;font-weight:600}
+  main{max-width:860px;margin:0 auto;padding:20px 16px 90px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 16px;line-height:1.5}
+  .num{font-variant-numeric:tabular-nums}
+  button{cursor:pointer;border:none;border-radius:9px;font-size:13px;font-weight:600;padding:9px 14px;
+    background:var(--panel2);color:var(--text);border:1px solid var(--line)}
+  button:hover{filter:brightness(1.15)}
+  button:disabled{opacity:.5;cursor:default}
+  .primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .save{background:var(--done);border-color:var(--done);color:#04180d}
+  /* Profit summary card */
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 18px 8px;margin-bottom:18px}
+  .net{display:flex;align-items:baseline;gap:10px;margin-bottom:6px}
+  .net .lbl{color:var(--muted);font-size:13px}
+  .net .val{font-size:30px;font-weight:800}
+  .net .val.pos{color:var(--done)} .net .val.neg{color:var(--bad)}
+  .brk{display:grid;grid-template-columns:1fr auto;gap:2px 16px;margin-top:10px;font-size:13.5px}
+  .brk .r{display:contents}
+  .brk .r>div{padding:5px 0;border-top:1px dashed var(--line)}
+  .brk .r:first-child>div{border-top:none}
+  .brk .k{color:var(--muted)} .brk .v{text-align:right}
+  .brk .minus .v{color:var(--bad)} .brk .total .k,.brk .total .v{font-weight:800;color:var(--text)}
+  .meta{color:var(--muted);font-size:12.5px;margin-top:8px}
+  .flag{color:var(--warn);font-size:12.5px;margin-top:6px}
+  .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 14px}
+  .stat{color:var(--muted);font-size:12.5px}
+  .status{font-size:12.5px;color:var(--muted)}
+  /* Catalog table */
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{text-align:left;padding:9px 10px;border-top:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.3px;position:sticky;top:57px;background:var(--bg)}
+  td.r,th.r{text-align:right}
+  tr.arch td{opacity:.5}
+  .pill{font-size:10.5px;padding:2px 7px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);margin-left:6px}
+  input.cost{width:92px;background:var(--panel2);border:1px solid var(--line);color:var(--text);
+    padding:7px 9px;border-radius:8px;font-size:13px;text-align:right}
+  input.cost.dirty{border-color:var(--accent)}
+  .prod{font-weight:600} .var{color:var(--muted);font-size:12.5px}
+  .empty{color:var(--muted);text-align:center;padding:40px 20px;border:1px dashed var(--line);border-radius:12px}
+  .toggle{color:var(--accent);cursor:pointer;font-size:12.5px;user-select:none}
+  .foot{position:fixed;left:0;right:0;bottom:0;background:#141824e6;backdrop-filter:blur(6px);
+    border-top:1px solid var(--line);padding:12px 16px;display:flex;gap:12px;align-items:center;justify-content:center}
+</style>
+</head>
+<body>
+<header>
+  <a class="back" href="{{ADMIN}}">← Back to queue</a>
+  <h1>💰 Profit calculator</h1>
+  <span id="catstatus" class="status" style="margin-left:auto"></span>
+</header>
+<main>
+  <p class="sub">Enter your <b>cost per item</b> below. Profit is figured for the <b>current live stream</b>: revenue is the actual amount buyers paid, the <b>6% TikTok fee is charged on the pre-tax amount</b> (sales tax is excluded), and shipping is a flat <b>$5 per unique buyer</b> (same-buyer orders ship together, so it is only counted once per buyer). Costs are saved and persist across streams.</p>
+
+  <div class="card" id="profitCard">
+    <div class="net"><span class="val" id="netVal">—</span><span class="lbl" id="netLbl">tentative net profit · current stream</span></div>
+    <div class="brk" id="brk"></div>
+    <div class="flag" id="flag" style="display:none"></div>
+    <div class="meta" id="pmeta"></div>
+  </div>
+
+  <div class="bar">
+    <button class="primary" id="refreshBtn" onclick="refreshCatalog()">↻ Refresh catalog</button>
+    <button id="recalcBtn" onclick="loadProfit()">↻ Recalculate profit</button>
+    <span class="status" id="refreshStatus"></span>
+    <span class="stat" id="catcount" style="margin-left:auto"></span>
+  </div>
+
+  <div id="tableWrap"><div class="empty">Loading…</div></div>
+  <div style="margin-top:12px"><span class="toggle" id="archToggle" onclick="toggleArchived()" style="display:none"></span></div>
+</main>
+
+<div class="foot">
+  <span class="status" id="saveStatus"></span>
+  <button class="save" id="saveBtn" onclick="saveCosts()" disabled>Save costs</button>
+</div>
+
+<script>
+  var catalog = [];
+  var showArchived = false;
+  var dirty = {}; // skuId -> value
+
+  function money(n){ var x = Number(n||0); return (x<0?'-$':'$') + Math.abs(x).toFixed(2); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]; }); }
+
+  async function loadCatalog(){
+    try{
+      var res = await fetch('/api/catalog');
+      if(!res.ok){ location.href='{{ADMIN}}'; return; }
+      var j = await res.json();
+      catalog = j.catalog || [];
+      renderCatalog();
+    }catch(e){ document.getElementById('tableWrap').innerHTML = '<div class="empty">Could not load the catalog. Try refreshing.</div>'; }
+  }
+
+  function renderCatalog(){
+    var wrap = document.getElementById('tableWrap');
+    var active = catalog.filter(function(c){ return !c.archived; });
+    var archived = catalog.filter(function(c){ return c.archived; });
+    document.getElementById('catcount').textContent = active.length + ' active item' + (active.length===1?'':'s') + (archived.length? ' · ' + archived.length + ' archived':'');
+    var at = document.getElementById('archToggle');
+    if(archived.length){ at.style.display='inline'; at.textContent = (showArchived?'▾ Hide':'▸ Show') + ' ' + archived.length + ' archived item' + (archived.length===1?'':'s'); }
+    else at.style.display='none';
+    var rows = active.concat(showArchived ? archived : []);
+    if(!rows.length){ wrap.innerHTML = '<div class="empty">No items yet.<br><br>Click <b>Refresh catalog</b> to pull your store items from TikTok.</div>'; return; }
+    var body = rows.map(function(c){
+      var price = (c.price!=null && Number(c.price)>0) ? money(c.price) : '<span class="var">—</span>';
+      var costVal = (c.cost!=null) ? Number(c.cost) : '';
+      return '<tr class="'+(c.archived?'arch':'')+'">'+
+        '<td><span class="prod">'+esc(c.product||c.name||'Item')+'</span>'+(c.archived?'<span class="pill">archived</span>':'')+
+          (c.variant?'<div class="var">'+esc(c.variant)+'</div>':'')+'</td>'+
+        '<td class="r num">'+price+'</td>'+
+        '<td class="r"><input class="cost num" inputmode="decimal" data-sku="'+esc(c.skuId)+'" value="'+costVal+'" placeholder="0.00" oninput="onCost(this)"></td>'+
+      '</tr>';
+    }).join('');
+    wrap.innerHTML = '<table><thead><tr><th>Item</th><th class="r">Sell price</th><th class="r">Your cost</th></tr></thead><tbody>'+body+'</tbody></table>';
+  }
+
+  function onCost(el){
+    var sku = el.getAttribute('data-sku');
+    dirty[sku] = el.value;
+    el.classList.add('dirty');
+    document.getElementById('saveBtn').disabled = Object.keys(dirty).length===0;
+    document.getElementById('saveStatus').textContent = Object.keys(dirty).length + ' unsaved change' + (Object.keys(dirty).length===1?'':'s');
+  }
+
+  async function saveCosts(){
+    var keys = Object.keys(dirty);
+    if(!keys.length) return;
+    var costs = {};
+    keys.forEach(function(k){ var v = dirty[k].trim(); costs[k] = (v==='') ? '' : Number(v); });
+    var btn = document.getElementById('saveBtn'); btn.disabled = true;
+    document.getElementById('saveStatus').textContent = 'Saving…';
+    try{
+      var res = await fetch('/api/item-costs', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ costs: costs }) });
+      var j = await res.json();
+      if(!j.ok) throw new Error('save failed');
+      // reflect saved values locally
+      keys.forEach(function(k){ var c = catalog.find(function(x){ return String(x.skuId)===String(k); }); if(c){ var v=dirty[k].trim(); c.cost = (v==='')?null:Number(v); } });
+      dirty = {};
+      document.querySelectorAll('input.cost.dirty').forEach(function(e){ e.classList.remove('dirty'); });
+      document.getElementById('saveStatus').textContent = 'Saved ✓';
+      loadProfit();
+    }catch(e){ document.getElementById('saveStatus').textContent = 'Could not save — try again.'; btn.disabled=false; }
+  }
+
+  async function refreshCatalog(){
+    var btn = document.getElementById('refreshBtn'); btn.disabled = true;
+    var st = document.getElementById('refreshStatus'); st.textContent = 'Pulling from TikTok…';
+    try{
+      var res = await fetch('/api/catalog/refresh', { method:'POST' });
+      var j = await res.json();
+      if(!j.ok) throw new Error(j.error||'refresh failed');
+      catalog = j.catalog || [];
+      renderCatalog();
+      var s = j.summary || {};
+      var src = (j.source==='sold-items') ? ' (from sold items — TikTok catalog unavailable: '+esc(j.error||'')+')' : '';
+      st.textContent = 'Added '+ (s.added||0) +', updated '+ (s.updated||0) +', archived '+ (s.archived||0) + src;
+      loadProfit();
+    }catch(e){ st.textContent = 'Refresh failed: ' + (e.message||e); }
+    btn.disabled = false;
+  }
+
+  async function loadProfit(){
+    try{
+      var r = await fetch('/api/profit');
+      var p = await r.json();
+      var netEl = document.getElementById('netVal');
+      netEl.textContent = money(p.net);
+      netEl.className = 'val ' + (p.net>=0?'pos':'neg');
+      document.getElementById('netLbl').textContent = p.live ? 'tentative net profit · current live stream' : 'tentative net profit · stream not live (current orders)';
+      var feePct = Math.round((p.feeRate||0.06)*100);
+      var rowsHtml = ''+
+        row('Revenue (buyers paid)', money(p.gross), '') +
+        row('Less sales tax', money(-p.tax), 'minus') +
+        row('Pre-tax sales', money(p.preTax), 'total') +
+        row('Cost of goods', money(-p.cogs), 'minus') +
+        row(feePct+'% TikTok fee (pre-tax)', money(-p.fee), 'minus') +
+        row('Shipping ($'+(p.shipPerBuyer||5)+' × '+p.buyerCount+' buyer'+(p.buyerCount===1?'':'s')+')', money(-p.shipping), 'minus') +
+        row('Net profit', money(p.net), 'total');
+      document.getElementById('brk').innerHTML = rowsHtml;
+      document.getElementById('pmeta').textContent = p.orderCount + ' order' + (p.orderCount===1?'':'s') + ' · ' + p.buyerCount + ' buyer' + (p.buyerCount===1?'':'s') + ' · ' + (p.costedActive||0) + '/' + (p.catalogActive||0) + ' active items have a cost set';
+      var flag = document.getElementById('flag');
+      if(p.missingCostUnits>0){
+        var names = (p.unmatched||[]).slice(0,6).map(function(u){ return esc(u.name)+' ×'+u.qty; }).join(', ');
+        flag.style.display='block';
+        flag.innerHTML = '⚠ '+p.missingCostUnits+' sold unit'+(p.missingCostUnits===1?'':'s')+' have no cost set (counted as $0 cost): '+names + ((p.unmatched&&p.unmatched.length>6)?' …':'');
+      } else flag.style.display='none';
+    }catch(e){ /* leave prior values */ }
+  }
+  function row(k,v,cls){ return '<div class="r '+(cls||'')+'"><div class="k">'+esc(k)+'</div><div class="v num">'+v+'</div></div>'; }
+
+  function toggleArchived(){ showArchived = !showArchived; renderCatalog(); }
+
+  loadCatalog();
+  loadProfit();
+</script>
+</body>
+</html>

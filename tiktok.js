@@ -268,6 +268,12 @@ export function normalizeOrder(o) {
     buyerHandle: (handle && handle !== display) ? handle : '',
     items,
     total: Number(o.payment?.total_amount || o.total_amount || 0),
+    // Sales tax on the order (TikTok collects/remits it — it is NOT seller income
+    // and the TikTok fee is charged on the PRE-TAX amount). Captured so the profit
+    // page can base the 6% fee and the seller-revenue figure on total − tax.
+    tax: Number(o.payment?.tax || o.tax_amount || 0),
+    // Pre-tax product subtotal when TikTok provides it (diagnostic / fallback).
+    subtotal: Number(o.payment?.sub_total || o.payment?.subtotal || 0),
     createdAt: o.create_time ? o.create_time * 1000 : Date.now(),
     // TikTok flips an order On Hold when there's something to check before
     // shipping — most often a buyer cancellation request on an unshipped order.
@@ -305,6 +311,92 @@ async function searchOrderIds(sinceEpoch, orderStatus) {
     if (!pageToken) break;
   }
   return ids;
+}
+
+// Fold a product title + variant into the SAME display name normalizeOrder()
+// builds, so a catalog item matches the item name on an actual order.
+function foldName(product, variant) {
+  const base = String(product || '').trim() || 'Item';
+  const v = String(variant || '').trim();
+  return (v && !base.toLowerCase().includes(v.toLowerCase())) ? `${base} - ${v}` : base;
+}
+
+// Pull the whole product catalog (every listed product + its SKUs and prices)
+// from TikTok Shop, paginated. Read-only. Returns a flat list of sellable items
+// that matches how orders name their line items, so the profit page can line up
+// each sold item with a cost. Needs the product-read scope on the TikTok app; if
+// that isn't granted the call comes back { ok:false, error } and the caller falls
+// back to building the list from items that have actually sold.
+export async function fetchCatalog() {
+  if (!tiktokEnabled()) return { ok: false, error: 'tiktok not enabled', items: [] };
+  try {
+    if (!tokens.shopCipher) { try { await getShopCipher(); } catch (e) { /* surfaced below */ } }
+    const pathName = `/product/${API_VERSION}/products/search`;
+    const items = [];
+    let pageToken = '';
+    let lastErr = '';
+    for (let page = 0; page < 40; page++) { // hard cap so a bad token can't loop forever
+      const extra = { page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) };
+      // status omitted = all; TikTok returns ACTIVATE/DEACTIVATED/etc. We keep
+      // everything and let the merge archive anything no longer returned.
+      const body = await apiCall('POST', pathName, extra, {});
+      if (body && body.code && body.code !== 0) {
+        lastErr = `code ${body.code}: ${String(body.message || '').slice(0, 160)}`;
+        break;
+      }
+      const products = (body && body.data && body.data.products) || [];
+      for (const p of products) {
+        const product = p.title || p.product_name || '';
+        const productId = String(p.id || p.product_id || '');
+        const status = String(p.status || '').toUpperCase();
+        for (const sku of (p.skus || [])) {
+          // Variant = the SKU's sales-attribute value(s) (e.g. "Ascended Heroes").
+          const variant = (sku.sales_attributes || [])
+            .map((a) => a.value_name || a.name || '').filter(Boolean).join(' / ');
+          // Price: 202309 SKUs carry price.sale_price / price.tax_exclusive_price.
+          const pr = sku.price || {};
+          const price = Number(
+            pr.sale_price != null ? pr.sale_price
+            : pr.tax_exclusive_price != null ? pr.tax_exclusive_price
+            : pr.original_price != null ? pr.original_price
+            : pr.amount != null ? pr.amount : 0,
+          ) || 0;
+          const skuId = String(sku.id || sku.sku_id || '');
+          if (!skuId) continue;
+          items.push({
+            skuId,
+            sellerSku: String(sku.seller_sku || sku.sku_id || ''),
+            productId,
+            product,
+            variant,
+            name: foldName(product, variant),
+            price,
+            currency: String(pr.currency || ''),
+            status,
+          });
+        }
+      }
+      pageToken = (body && body.data && (body.data.next_page_token || body.data.total_page_token)) || '';
+      if (!pageToken) break;
+    }
+    if (!items.length) {
+      return { ok: false, error: lastErr || 'no products returned (product-read scope may not be granted)', items: [] };
+    }
+    return { ok: true, items, count: items.length };
+  } catch (e) {
+    return { ok: false, error: e.message || String(e), items: [] };
+  }
+}
+
+// Admin-only inspector: return the raw first page of the product search so the
+// exact field shape (price keys, variant keys) can be confirmed after deploy.
+export async function debugCatalogRaw() {
+  if (!tiktokEnabled()) return { ok: false, note: 'tiktok not enabled' };
+  try {
+    if (!tokens.shopCipher) { try { await getShopCipher(); } catch (e) {} }
+    const body = await apiCall('POST', `/product/${API_VERSION}/products/search`, { page_size: 2 }, {});
+    return { ok: true, sample: body };
+  } catch (e) { return { ok: false, error: e.message || String(e) }; }
 }
 
 // Admin-only inspector: fetch one raw order and surface any handle-ish fields so

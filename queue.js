@@ -21,6 +21,9 @@ const STATE_FILE = path.join(DATA_DIR, 'queue-state.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 const MAX_HISTORY = 5; // keep the last N streams for the admin history view
+const CATALOG_FILE = path.join(DATA_DIR, 'catalog.json'); // persisted product catalog + per-item cost
+const TIKTOK_FEE_RATE = 0.06;   // TikTok fee, charged on the PRE-TAX order amount
+const SHIP_PER_BUYER = 5;       // flat outbound shipping cost per unique buyer per stream
 
 /**
  * Order record:
@@ -52,6 +55,13 @@ export class QueueEngine extends EventEmitter {
     this.streamStartAt = null; // ms epoch of the manually-set stream start
     this.clips = [];           // [{ id, at (ms epoch), note }]
     this.clipCounter = 0;
+    // Product catalog + cost ledger (for the profit page), keyed by TikTok sku id.
+    // { [skuId]: { skuId, sellerSku, productId, product, variant, name, price,
+    //   currency, cost, archived, firstSeen, lastSeen, status } }. A "Refresh
+    // catalog" re-pulls from TikTok and merges: new items added, prices updated,
+    // and items no longer listed marked archived (NOT deleted) so their cost and
+    // any historical profit math are preserved.
+    this.catalog = {};
     this._ensureDataDir();
     this._load();
     this._seedFromEnv();
@@ -85,6 +95,14 @@ export class QueueEngine extends EventEmitter {
       }
     } catch (e) {
       console.warn('[queue] could not load history:', e.message);
+    }
+    try {
+      if (fs.existsSync(CATALOG_FILE)) {
+        const obj = JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf8'));
+        if (obj && typeof obj === 'object' && !Array.isArray(obj)) this.catalog = obj;
+      }
+    } catch (e) {
+      console.warn('[queue] could not load catalog:', e.message);
     }
     try {
       if (fs.existsSync(STATE_FILE)) {
@@ -251,6 +269,179 @@ export class QueueEngine extends EventEmitter {
     } catch (e) {
       console.warn('[queue] history persist failed:', e.message);
     }
+  }
+
+  _persistCatalog() {
+    try {
+      fs.writeFileSync(CATALOG_FILE, JSON.stringify(this.catalog));
+    } catch (e) {
+      console.warn('[queue] catalog persist failed:', e.message);
+    }
+  }
+
+  // ── Product catalog + cost ledger (profit page) ─────────────────────────────
+  /** Merge a freshly-fetched catalog into the stored one. New SKUs are added,
+   *  existing ones have their price/details refreshed (cost is ALWAYS preserved),
+   *  and any stored SKU not in the fetch is marked archived (kept, not deleted) so
+   *  its cost and historical profit math survive. Returns a change summary. */
+  mergeCatalog(items) {
+    const now = Date.now();
+    const liveIds = new Set();
+    let added = 0, updated = 0, unarchived = 0, archived = 0;
+    for (const it of (items || [])) {
+      const id = String(it.skuId || '');
+      if (!id) continue;
+      liveIds.add(id);
+      const prev = this.catalog[id];
+      if (prev) {
+        prev.sellerSku = it.sellerSku || prev.sellerSku;
+        prev.productId = it.productId || prev.productId;
+        prev.product = it.product || prev.product;
+        if (it.variant != null) prev.variant = it.variant;
+        prev.name = it.name || prev.name;
+        prev.price = Number(it.price) || 0;
+        prev.currency = it.currency || prev.currency;
+        prev.status = it.status || prev.status;
+        prev.lastSeen = now;
+        if (prev.archived) { prev.archived = false; unarchived++; }
+        updated++;
+      } else {
+        this.catalog[id] = {
+          skuId: id,
+          sellerSku: it.sellerSku || '',
+          productId: it.productId || '',
+          product: it.product || '',
+          variant: it.variant || '',
+          name: it.name || '',
+          price: Number(it.price) || 0,
+          currency: it.currency || '',
+          cost: null,
+          archived: false,
+          firstSeen: now,
+          lastSeen: now,
+          status: it.status || '',
+        };
+        added++;
+      }
+    }
+    // Archive anything no longer returned by the catalog (preserve its cost).
+    for (const id of Object.keys(this.catalog)) {
+      if (!liveIds.has(id) && !this.catalog[id].archived) { this.catalog[id].archived = true; archived++; }
+    }
+    this._persistCatalog();
+    this.emit('change', { reason: 'catalog-refresh' });
+    const all = Object.values(this.catalog);
+    return {
+      added, updated, unarchived, archived,
+      total: all.length,
+      active: all.filter((c) => !c.archived).length,
+    };
+  }
+
+  /** Fallback item list built from items that have actually sold (current stream +
+   *  archived history), for when the TikTok product-read scope isn't available.
+   *  Selling price is unknown here (orders only carry an order-level total), so
+   *  price is 0 — cost entry and profit (which uses real order totals) still work. */
+  soldItemCatalogFallback() {
+    const seen = new Map();
+    const add = (items) => {
+      for (const it of (items || [])) {
+        const sku = String((it && it.sku) || '');
+        const name = String((it && it.name) || '').trim();
+        if (!sku && !name) continue;
+        const key = sku || ('name:' + name.toLowerCase());
+        if (!seen.has(key)) {
+          seen.set(key, { skuId: key, sellerSku: sku, productId: '', product: '', variant: '', name: name || key, price: 0, currency: '', status: 'SOLD' });
+        }
+      }
+    };
+    for (const o of this.orders.values()) add(o.items);
+    for (const s of (this.history || [])) { add(s.fulfilled && s.fulfilled.flatMap ? s.fulfilled.flatMap((r) => r.items || []) : []); add(s.unfulfilled && s.unfulfilled.flatMap ? s.unfulfilled.flatMap((r) => r.items || []) : []); }
+    return [...seen.values()];
+  }
+
+  /** The stored catalog as a sorted array (active first, then by product/variant). */
+  catalogList() {
+    return Object.values(this.catalog).sort((a, b) => {
+      if (!!a.archived !== !!b.archived) return a.archived ? 1 : -1;
+      const p = String(a.product || '').localeCompare(String(b.product || ''));
+      return p !== 0 ? p : String(a.variant || '').localeCompare(String(b.variant || ''));
+    });
+  }
+
+  /** Set per-item costs from { [skuId]: cost }. Empty/invalid clears the cost. */
+  setItemCosts(map) {
+    if (!map || typeof map !== 'object') return 0;
+    let n = 0;
+    for (const [id, v] of Object.entries(map)) {
+      const e = this.catalog[String(id)];
+      if (!e) continue;
+      const c = (v === '' || v == null) ? null : Number(v);
+      e.cost = (c != null && isFinite(c) && c >= 0) ? c : null;
+      n++;
+    }
+    this._persistCatalog();
+    this.emit('change', { reason: 'catalog-costs' });
+    return n;
+  }
+
+  /** Tentative profit for the CURRENT live stream (all orders in memory). Revenue
+   *  uses the actual amount buyers paid; the 6% TikTok fee is charged on the
+   *  PRE-TAX amount (total − tax), since sales tax is collected/remitted and is not
+   *  seller income. Shipping is a flat $5 per UNIQUE buyer (same-buyer orders ship
+   *  together, so the buyer id dedups it automatically). COGS sums each non-
+   *  cancelled line item's quantity × the cost entered for its catalog SKU. */
+  profitReport() {
+    // Resolver: order items reference sku (seller_sku||sku_id) and a folded name.
+    const bySku = new Map();
+    const byName = new Map();
+    for (const e of Object.values(this.catalog)) {
+      if (e.skuId) bySku.set(String(e.skuId), e);
+      if (e.sellerSku) bySku.set(String(e.sellerSku), e);
+      if (e.name) byName.set(String(e.name).toLowerCase(), e);
+    }
+    const resolve = (item) => {
+      const sku = String(item.sku || '');
+      if (sku && bySku.has(sku)) return bySku.get(sku);
+      const nm = String(item.name || '').toLowerCase();
+      if (nm && byName.has(nm)) return byName.get(nm);
+      return null;
+    };
+    // Current-stream orders = everything in memory, minus whole-order cancels.
+    const orders = [...this.orders.values()].filter((o) => !o.cancelRequested);
+    let gross = 0, tax = 0, cogs = 0, missingCostUnits = 0;
+    const buyers = new Set();
+    const unmatched = new Map();
+    for (const o of orders) {
+      gross += Number(o.total) || 0;
+      tax += Number(o.tax) || 0;
+      buyers.add(String(o.buyerId));
+      for (const it of (o.items || [])) {
+        if (it.cancelled) continue;
+        const qty = Number(it.qty) || 1;
+        const e = resolve(it);
+        if (e && e.cost != null) cogs += e.cost * qty;
+        else { missingCostUnits += qty; const k = it.name || '(unnamed)'; unmatched.set(k, (unmatched.get(k) || 0) + qty); }
+      }
+    }
+    const preTax = gross - tax;
+    const fee = preTax * TIKTOK_FEE_RATE;
+    const shipping = buyers.size * SHIP_PER_BUYER;
+    const net = preTax - cogs - fee - shipping;
+    return {
+      live: this.live,
+      orderCount: orders.length,
+      buyerCount: buyers.size,
+      gross, tax, preTax,
+      cogs, fee, feeRate: TIKTOK_FEE_RATE,
+      shipping, shipPerBuyer: SHIP_PER_BUYER,
+      net,
+      missingCostUnits,
+      unmatched: [...unmatched.entries()].map(([name, qty]) => ({ name, qty }))
+        .sort((a, b) => b.qty - a.qty).slice(0, 50),
+      catalogActive: Object.values(this.catalog).filter((c) => !c.archived).length,
+      costedActive: Object.values(this.catalog).filter((c) => !c.archived && c.cost != null).length,
+    };
   }
 
   /** Detailed per-order records of everything fulfilled this session. */
@@ -698,6 +889,16 @@ export class QueueEngine extends EventEmitter {
     };
   }
 
+  /** Lean profit summary for the live header readout (no per-item arrays). */
+  profitSummary() {
+    const p = this.profitReport();
+    return {
+      net: p.net, gross: p.gross, preTax: p.preTax, cogs: p.cogs,
+      fee: p.fee, shipping: p.shipping, buyerCount: p.buyerCount,
+      orderCount: p.orderCount, missingCostUnits: p.missingCostUnits, live: p.live,
+    };
+  }
+
   snapshot() {
     return {
       queue: this.activeQueue(),
@@ -710,6 +911,7 @@ export class QueueEngine extends EventEmitter {
         count: this.variantCounts[v.id] || 0,
       })),
       variantLog: this.variantLog.slice(0, 50),
+      profit: this.profitSummary(),
       streamStartAt: this.streamStartAt,
       clips: this.clips.slice().sort((a, b) => (a.at || 0) - (b.at || 0)),
       history: this.history.map((s) => ({

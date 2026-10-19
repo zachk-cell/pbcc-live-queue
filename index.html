@@ -27,6 +27,10 @@
   .stat{text-align:center;min-width:64px}
   .stat b{display:block;font-size:20px;line-height:1.1}
   .stat span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+  .stat.profit{padding-left:16px;border-left:1px solid #272c38}
+  .stat.profit b{color:#8b93a7}
+  .stat.profit b.pos{color:#25c26e}
+  .stat.profit b.neg{color:#ff6a6a}
   main{max-width:920px;margin:0 auto;padding:18px 16px 80px}
   .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:nowrap}
   .toolbar input{flex:1;min-width:140px;background:var(--panel2);border:1px solid var(--line);
@@ -197,6 +201,7 @@
     <div class="stat"><b id="s-done">0</b><span>Fulfilled</span></div>
     <div class="stat"><b id="s-avgq">—</b><span>Avg in queue</span></div>
     <div class="stat"><b id="s-avgt">—</b><span>Avg at top</span></div>
+    <div class="stat profit"><b id="s-profit" title="Tentative net profit this stream (revenue − cost − 6% pre-tax fee − $5/buyer shipping). Set item costs on the Profit page.">—</b><span>Stream profit</span></div>
   </div>
 </header>
 
@@ -207,6 +212,7 @@
     <button class="ghost" onclick="openPriority()">⭐ Priority items</button>
     <button class="ghost" onclick="resetQueue()">Reset</button>
     <a href="{{ADMIN}}/history" style="text-decoration:none"><button class="ghost">🗂 Past streams ↗</button></a>
+    <a href="{{ADMIN}}/profit" style="text-decoration:none"><button class="ghost">💰 Profit ↗</button></a>
     <a href="/" target="_blank" style="text-decoration:none"><button class="ghost">Public view ↗</button></a>
   </div>
 
@@ -907,6 +913,16 @@
     document.getElementById('s-done').textContent = st.fulfilledCount||0;
     document.getElementById('s-avgq').textContent = fmtDur(st.avgTimeInQueueMs);
     document.getElementById('s-avgt').textContent = fmtDur(st.avgFulfillmentMs);
+    // Running tentative net profit for the current stream (from the profit page's
+    // cost table). Green when positive, red when negative; dims if no costs set yet.
+    var pf = state.profit || null;
+    var pfEl = document.getElementById('s-profit');
+    if(pf && typeof pf.net === 'number'){
+      pfEl.textContent = money(pf.net);
+      pfEl.classList.toggle('pos', pf.net >= 0);
+      pfEl.classList.toggle('neg', pf.net < 0);
+      pfEl.title = 'Tentative net profit this stream · revenue ' + money(pf.gross) + ' − tax ' + money(pf.tax||0) + ' − cost ' + money(pf.cogs) + ' − 6% fee ' + money(pf.fee) + ' − shipping ' + money(pf.shipping) + ' ('+pf.buyerCount+' buyer'+(pf.buyerCount===1?'':'s')+')' + (pf.missingCostUnits? ' · ⚠ '+pf.missingCostUnits+' sold unit(s) have no cost set':'');
+    } else { pfEl.textContent = '—'; }
 
     const chips = document.getElementById('pri-chips');
     const chipSig = (state.config.priorityItems||[]).join('|');

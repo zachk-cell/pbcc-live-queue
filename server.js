@@ -17,7 +17,7 @@ import { Server as IOServer } from 'socket.io';
 import { authenticator } from 'otplib';
 
 import { QueueEngine } from './queue.js';
-import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus, tiktokTokensForEnv, debugShops, refetchShopCipher, debugRawOrder, debugCancellations } from './tiktok.js';
+import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus, tiktokTokensForEnv, debugShops, refetchShopCipher, debugRawOrder, debugCancellations, fetchCatalog, debugCatalogRaw } from './tiktok.js';
 import { startDiscord, discordEnabled } from './discord.js';
 import { startSimulator } from './simulator.js';
 
@@ -233,6 +233,8 @@ app.get(ADMIN + '/logout', (_req, res) => {
 });
 app.get(ADMIN + '/history', (req, res) =>
   sendAdminPage(res, isAuthed(req) ? 'history.html' : 'login.html'));
+app.get(ADMIN + '/profit', (req, res) =>
+  sendAdminPage(res, isAuthed(req) ? 'profit.html' : 'login.html'));
 
 // ---------- Control API (auth required) ----------
 app.get('/api/state', requireAuth, (_req, res) => res.json(queue.snapshot()));
@@ -431,6 +433,42 @@ function sendCsv(res, filename, records, cancelled = [], unfulfilled = []) {
   res.send('﻿' + toCsv(records, cancelled, unfulfilled));
 }
 // Past-stream summaries for the history page.
+// ---------- Profit page: catalog + per-item cost + current-stream profit ----------
+// The stored catalog (persisted; does not hit TikTok).
+app.get('/api/catalog', requireAuth, (_req, res) => res.json({ ok: true, catalog: queue.catalogList() }));
+
+// Re-pull the live TikTok catalog and merge it (add new, update prices, archive
+// anything no longer listed — costs preserved). Falls back to the sold-items list
+// if the product-read scope isn't available, so the page always populates.
+app.post('/api/catalog/refresh', requireAuth, async (_req, res) => {
+  try {
+    const cat = await fetchCatalog();
+    if (cat && cat.ok && cat.items.length) {
+      const summary = queue.mergeCatalog(cat.items);
+      return res.json({ ok: true, source: 'tiktok', summary, catalog: queue.catalogList() });
+    }
+    // Fallback: derive from items that have actually sold.
+    const fb = queue.soldItemCatalogFallback();
+    const summary = queue.mergeCatalog(fb);
+    return res.json({ ok: true, source: 'sold-items', fallback: true, error: (cat && cat.error) || 'catalog unavailable', summary, catalog: queue.catalogList() });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// Save per-item costs: body { costs: { [skuId]: cost } }.
+app.post('/api/item-costs', requireAuth, (req, res) => {
+  const costs = (req.body && (req.body.costs || req.body)) || {};
+  const n = queue.setItemCosts(costs);
+  res.json({ ok: true, updated: n });
+});
+
+// Tentative profit for the current live stream.
+app.get('/api/profit', requireAuth, (_req, res) => res.json(queue.profitReport()));
+
+// Admin inspector: raw first page of the product search (confirm field shape).
+app.get('/api/catalog/raw', requireAuth, async (_req, res) => {
+  try { res.json(await debugCatalogRaw()); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.get('/api/history', requireAuth, (_req, res) => res.json({ history: queue.snapshot().history }));
 // Current stream's orders (fulfilled + cancelled).
 app.get('/api/export', requireAuth, (_req, res) =>
