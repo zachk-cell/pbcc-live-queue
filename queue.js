@@ -421,6 +421,7 @@ export class QueueEngine extends EventEmitter {
         prev.currency = it.currency || prev.currency;
         prev.status = it.status || prev.status;
         if (it.stock !== undefined) prev.stock = it.stock; // refresh on-hand stock
+        if (it.warehouseIds !== undefined) prev.warehouseIds = it.warehouseIds;
         prev.lastSeen = now;
         if (prev.archived) { prev.archived = false; unarchived++; }
         updated++;
@@ -439,6 +440,7 @@ export class QueueEngine extends EventEmitter {
           fixedProfit: null,   // flat profit per unit when fixed
           group: '', // user-assigned category (preserved across refreshes)
           stock: (it.stock !== undefined ? it.stock : null),
+          warehouseIds: (it.warehouseIds || []),
           archived: false,
           firstSeen: now,
           lastSeen: now,

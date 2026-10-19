@@ -100,6 +100,17 @@
   input.fxin{width:78px;background:var(--panel2);border:1px solid var(--warn);color:var(--text);padding:7px 9px;border-radius:8px;font-size:13px;text-align:right}
   input.fxin.dirty{border-color:var(--accent)}
   .prod{font-weight:600} .var{color:var(--muted);font-size:12.5px}
+  /* Inventory metrics */
+  .invrow{display:flex;gap:12px;flex-wrap:wrap}
+  .invtile{flex:1;min-width:120px;background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:12px 14px}
+  .invv{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums}
+  .invl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.4px;margin-top:2px}
+  td.qty{text-align:right;font-variant-numeric:tabular-nums}
+  input.qtyin{width:68px;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:7px 9px;border-radius:8px;font-size:13px;text-align:right}
+  input.qtyin.dirty{border-color:var(--accent)}
+  .qtywrap{display:flex;align-items:center;gap:6px;justify-content:flex-end}
+  .qtysave{font-size:11px;padding:5px 8px;border-radius:7px;border:1px solid var(--done);background:var(--done);color:#04180d;cursor:pointer;display:none}
+  .qtywrap.changed .qtysave{display:inline-block}
   .empty{color:var(--muted);text-align:center;padding:40px 20px;border:1px dashed var(--line);border-radius:12px}
   .toggle{color:var(--accent);cursor:pointer;font-size:12.5px;user-select:none}
   .foot{position:fixed;left:0;right:0;bottom:0;background:#141824e6;backdrop-filter:blur(6px);
@@ -120,6 +131,15 @@
     <div class="brk" id="brk"></div>
     <div class="flag" id="flag" style="display:none"></div>
     <div class="meta" id="pmeta"></div>
+  </div>
+
+  <div class="card" id="invCard">
+    <div class="invrow">
+      <div class="invtile"><div class="invv" id="invUnits">—</div><div class="invl">units on hand</div></div>
+      <div class="invtile"><div class="invv" id="invCost">—</div><div class="invl">value at cost</div></div>
+      <div class="invtile"><div class="invv" id="invRetail">—</div><div class="invl">value at sell price</div></div>
+    </div>
+    <div class="meta" id="invMeta"></div>
   </div>
 
   <div class="bar">
@@ -151,6 +171,8 @@
   var dirtyFixed = {};   // skuId -> fixed-profit string ('' = clear / not fixed)
   var draggingSku = null;
   var draggingGroup = null; // category name being dragged to reorder
+  var canEditInv = false;   // true when the TikTok app has inventory WRITE scope
+  var dirtyQty = {};        // skuId -> new qty string (pending inventory edits)
   var collapsed = loadCollapsed(); // { groupKey: true }
 
   function loadCollapsed(){ try{ return JSON.parse(localStorage.getItem('pbccProfitCollapsed')||'{}')||{}; }catch(e){ return {}; } }
@@ -227,6 +249,56 @@
     document.getElementById('catcount').textContent = active.length + ' active item' + (active.length===1?'':'s') + (oosN? ' · '+oosN+' out of stock':'') + (archived.length? ' · '+archived.length+' archived':'');
     wrap.innerHTML = order.map(function(k){ return groupHtml(buckets[k]); }).join('');
     wireGroups(wrap);
+    renderInventoryMetrics();
+  }
+
+  function renderInventoryMetrics(){
+    var units=0, atCost=0, atRetail=0, costedUnits=0;
+    catalog.forEach(function(c){
+      if(c.archived) return;
+      var s = Number(c.stock); if(!isFinite(s) || s<=0) return;
+      units += s;
+      atRetail += s * (Number(c.price)||0);
+      if(c.cost!=null){ atCost += s * Number(c.cost); costedUnits += s; }
+    });
+    var u=document.getElementById('invUnits'), ic=document.getElementById('invCost'), ir=document.getElementById('invRetail'), im=document.getElementById('invMeta');
+    if(u) u.textContent = units.toLocaleString();
+    if(ic) ic.textContent = money(atCost);
+    if(ir) ir.textContent = money(atRetail);
+    if(im) im.textContent = 'On-hand value across in-stock items. Value at cost covers the '+costedUnits.toLocaleString()+' of '+units.toLocaleString()+' units that have a cost set'+(canEditInv?' · quantities are editable (writes to TikTok)':'')+'. Refresh the catalog to update stock levels.';
+  }
+
+  function onQty(el){
+    dirtyQty[el.getAttribute('data-sku')] = el.value;
+    el.classList.add('dirty');
+    var w = el.closest('.qtywrap'); if(w) w.classList.add('changed');
+  }
+  async function saveQty(btn){
+    var sku = btn.getAttribute('data-sku');
+    var w = btn.closest('.qtywrap');
+    var inp = w.querySelector('.qtyin');
+    var q = Math.max(0, Math.floor(Number(inp.value)));
+    if(!isFinite(q)){ return; }
+    btn.disabled = true; btn.textContent='…';
+    try{
+      var res = await fetch('/api/inventory/update', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ skuId:sku, quantity:q }) }).then(function(r){ return r.json(); });
+      if(res.ok){
+        var c = catalog.find(function(x){ return String(x.skuId)===String(sku); }); if(c) c.stock = q;
+        delete dirtyQty[sku];
+        renderCatalog();
+      } else {
+        btn.disabled=false; btn.textContent='Set';
+        alert('Could not update inventory: ' + (res.message || res.error || ('code '+res.code)) + (res.code===105005 ? '\n\n(The app needs the Product Modify scope for inventory writes.)' : ''));
+      }
+    }catch(e){ btn.disabled=false; btn.textContent='Set'; alert('Could not update inventory — check your connection.'); }
+  }
+
+  async function loadInvScope(){
+    try{
+      var r = await fetch('/api/inventory/scope-check').then(function(x){ return x.json(); });
+      canEditInv = !!(r && r.hasScope);
+    }catch(e){ canEditInv = false; }
+    renderCatalog();
   }
 
   var pendingGroup = null, pendingBefore = null, pendingGroupBefore = null;
@@ -388,12 +460,12 @@
     var sub = (g.kind==='oos') ? ' <span class="gmeta">(auto)</span>' : (g.kind==='archived' ? ' <span class="gmeta">(delisted — kept for history)</span>' : '');
     var rm = (g.kind==='cat') ? '<span class="grm" title="Remove this category" onclick="removeCategory(\''+esc(g.gname).replace(/'/g,"&#39;")+'\')">✕</span>' : '';
     var gdh = (g.kind==='cat') ? '<span class="gdh" draggable="true" title="Drag to reorder categories">⠿</span>' : '';
-    var rows = g.items.length ? g.items.map(rowHtml).join('') : '<tr class="gempty"><td colspan="5">Drag items here</td></tr>';
+    var rows = g.items.length ? g.items.map(rowHtml).join('') : '<tr class="gempty"><td colspan="6">Drag items here</td></tr>';
     var nameHtml = '<span class="gname">'+esc(g.label)+'</span>'
       + (g.kind==='cat' ? '<span class="gedit" title="Rename category" onclick="startRename(this,event)">✎</span>' : '');
     return '<div class="group '+(isColl?'collapsed':'')+(droppable?' droppable':'')+(g.kind==='cat'?' iscat':'')+'" data-key="'+esc(g.key)+'" data-gname="'+esc(g.gname)+'">'+
       '<div class="ghead">'+gdh+'<span class="gcaret">▾</span>'+nameHtml+sub+rm+'<span class="gcount">'+g.items.length+'</span></div>'+
-      '<div class="gbody"><table><thead><tr><th class="dhh"></th><th>Item</th><th>Category</th><th class="r">Sell price</th><th class="r">Cost / Fixed profit</th></tr></thead><tbody>'+rows+'</tbody></table></div>'+
+      '<div class="gbody"><table><thead><tr><th class="dhh"></th><th>Item</th><th>Category</th><th class="r">Sell price</th><th class="r">Qty</th><th class="r">Cost / Fixed profit</th></tr></thead><tbody>'+rows+'</tbody></table></div>'+
     '</div>';
   }
 
@@ -410,11 +482,20 @@
       '<label class="fx"><input type="checkbox" class="fxchk" data-sku="'+esc(c.skuId)+'" '+(isFixed?'checked':'')+' onchange="onFixedChk(this)"> fixed</label>'+
       '<input class="fxin num" inputmode="decimal" data-sku="'+esc(c.skuId)+'" value="'+(isFixed?fixedVal:'')+'" placeholder="profit" style="'+(isFixed?'':'display:none')+'" oninput="onFixed(this)">'+
       '<input class="cost num" inputmode="decimal" data-sku="'+esc(c.skuId)+'" value="'+costVal+'" placeholder="cost" style="'+(isFixed?'display:none':'')+'" oninput="onCost(this)">';
+    var stockVal = (c.stock!=null) ? Number(c.stock) : null;
+    var qtyCell;
+    if(canEditInv && !c.archived){
+      qtyCell = '<div class="qtywrap"><input class="qtyin num" inputmode="numeric" data-sku="'+esc(c.skuId)+'" value="'+(stockVal!=null?stockVal:'')+'" placeholder="—" oninput="onQty(this)">'+
+                '<button class="qtysave" onclick="saveQty(this)" data-sku="'+esc(c.skuId)+'">Set</button></div>';
+    } else {
+      qtyCell = (stockVal!=null ? stockVal : '<span class="var">—</span>');
+    }
     return '<tr data-sku="'+esc(c.skuId)+'" data-gname="'+groupVal+'"'+(c.archived?' class="arch"':'')+'>'+
       handle+
       '<td><span class="prod">'+esc(c.product||c.name||'Item')+'</span>'+badge+(c.variant?'<div class="var">'+esc(c.variant)+'</div>':'')+'</td>'+
       '<td><input class="grp" list="groupList" data-sku="'+esc(c.skuId)+'" value="'+groupVal+'" placeholder="—" oninput="onGroup(this)"></td>'+
       '<td class="r num">'+price+'</td>'+
+      '<td class="r qty">'+qtyCell+'</td>'+
       '<td class="r costcell">'+costCell+'</td>'+
     '</tr>';
   }
@@ -517,6 +598,7 @@
 
   loadCatalog();
   loadProfit();
+  loadInvScope();
 </script>
 </body>
 </html>

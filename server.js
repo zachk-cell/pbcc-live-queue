@@ -17,7 +17,7 @@ import { Server as IOServer } from 'socket.io';
 import { authenticator } from 'otplib';
 
 import { QueueEngine } from './queue.js';
-import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus, tiktokTokensForEnv, debugShops, refetchShopCipher, debugRawOrder, debugCancellations, fetchCatalog, debugCatalogRaw } from './tiktok.js';
+import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus, tiktokTokensForEnv, debugShops, refetchShopCipher, debugRawOrder, debugCancellations, fetchCatalog, debugCatalogRaw, checkInventoryWriteScope, updateSkuInventory } from './tiktok.js';
 import { startDiscord, discordEnabled } from './discord.js';
 import { startSimulator } from './simulator.js';
 
@@ -485,6 +485,35 @@ app.post('/api/item-costs', requireAuth, (req, res) => {
 
 // Tentative profit for the current live stream.
 app.get('/api/profit', requireAuth, (_req, res) => res.json(queue.profitReport()));
+
+// Non-destructive check: does the TikTok app have the inventory WRITE scope?
+app.get('/api/inventory/scope-check', requireAuth, async (_req, res) => {
+  try {
+    const withPid = (queue.catalogList() || []).find((c) => c.productId);
+    if (!withPid) return res.json({ ok: false, error: 'no product to test against — refresh the catalog first' });
+    res.json(await checkInventoryWriteScope(withPid.productId));
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// Change a SKU's available inventory on TikTok (needs Product Modify scope).
+// body { skuId, quantity }. Updates the live stock and the stored catalog on success.
+app.post('/api/inventory/update', requireAuth, async (req, res) => {
+  try {
+    const skuId = String((req.body && req.body.skuId) || '');
+    const quantity = Number(req.body && req.body.quantity);
+    const e = (queue.catalog || {})[skuId];
+    if (!e) return res.json({ ok: false, error: 'unknown item' });
+    if (!e.productId) return res.json({ ok: false, error: 'item has no product id' });
+    if (!Number.isFinite(quantity) || quantity < 0) return res.json({ ok: false, error: 'invalid quantity' });
+    const r = await updateSkuInventory(e.productId, skuId, quantity, e.warehouseIds);
+    if (r.ok) {
+      e.stock = Math.max(0, Math.floor(quantity));
+      queue._persistCatalog();
+      queue.emit('change', { reason: 'inventory-update' });
+    }
+    res.json(r);
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
 
 // Admin inspector: raw first page of the product search (confirm field shape).
 app.get('/api/catalog/raw', requireAuth, async (_req, res) => {

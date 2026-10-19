@@ -367,6 +367,7 @@ export async function fetchCatalog() {
           // TikTok doesn't return inventory (so we don't falsely flag out-of-stock).
           const inv = Array.isArray(sku.inventory) ? sku.inventory : [];
           const stock = inv.length ? inv.reduce((n, w) => n + (Number(w.quantity) || 0), 0) : null;
+          const warehouseIds = inv.map((w) => String(w.warehouse_id || '')).filter(Boolean);
           items.push({
             skuId,
             sellerSku: String(sku.seller_sku || sku.sku_id || ''),
@@ -378,6 +379,7 @@ export async function fetchCatalog() {
             currency: String(pr.currency || ''),
             status,
             stock,
+            warehouseIds,
           });
         }
       }
@@ -401,6 +403,50 @@ export async function debugCatalogRaw() {
     if (!tokens.shopCipher) { try { await getShopCipher(); } catch (e) {} }
     const body = await apiCall('POST', `/product/${API_VERSION}/products/search`, { page_size: 2 }, {});
     return { ok: true, sample: body };
+  } catch (e) { return { ok: false, error: e.message || String(e) }; }
+}
+
+// Non-destructive probe for the inventory WRITE scope. Calls the update-inventory
+// endpoint with an EMPTY skus list (nothing to change, so nothing is modified) and
+// reports the response code: 105005 = access denied (write scope NOT granted); any
+// other code (e.g. a validation error about missing skus) means the scope IS
+// granted. productId is a real product so the path resolves.
+export async function checkInventoryWriteScope(productId) {
+  if (!tiktokEnabled()) return { ok: false, error: 'tiktok not enabled' };
+  try {
+    if (!tokens.shopCipher) { try { await getShopCipher(); } catch (e) {} }
+    const pid = String(productId || '');
+    const body = await apiCall('POST', `/product/${API_VERSION}/products/${pid}/inventory/update`, {}, { skus: [] });
+    const code = body && body.code;
+    return {
+      ok: true,
+      code,
+      message: (body && body.message) || '',
+      denied: code === 105005,            // explicit access-denied
+      hasScope: code != null && code !== 105005, // any non-denied response = scope present
+    };
+  } catch (e) { return { ok: false, error: e.message || String(e) }; }
+}
+
+// Update a SKU's available inventory. Writes quantity to each of the SKU's
+// warehouses. Requires the Product Modify (seller.product.write) scope.
+export async function updateSkuInventory(productId, skuId, quantity, warehouseIds) {
+  if (!tiktokEnabled()) return { ok: false, error: 'tiktok not enabled' };
+  try {
+    if (!tokens.shopCipher) { try { await getShopCipher(); } catch (e) {} }
+    const q = Math.max(0, Math.floor(Number(quantity) || 0));
+    const whs = (Array.isArray(warehouseIds) && warehouseIds.length) ? warehouseIds : [];
+    const inv = whs.length
+      ? whs.map((w) => ({ warehouse_id: String(w), quantity: q }))
+      : [{ quantity: q }];
+    const body = await apiCall(
+      'POST',
+      `/product/${API_VERSION}/products/${String(productId)}/inventory/update`,
+      {},
+      { skus: [{ id: String(skuId), inventory: inv }] },
+    );
+    const code = body && body.code;
+    return { ok: code === 0, code, message: (body && body.message) || '', raw: body };
   } catch (e) { return { ok: false, error: e.message || String(e) }; }
 }
 
