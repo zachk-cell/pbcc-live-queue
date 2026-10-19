@@ -454,11 +454,14 @@ app.post('/api/catalog/refresh', requireAuth, async (_req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// Save per-item costs: body { costs: { [skuId]: cost } }.
+// Save per-item costs and/or group assignments:
+// body { costs: { [skuId]: cost }, groups: { [skuId]: groupName } } (either optional).
 app.post('/api/item-costs', requireAuth, (req, res) => {
-  const costs = (req.body && (req.body.costs || req.body)) || {};
-  const n = queue.setItemCosts(costs);
-  res.json({ ok: true, updated: n });
+  const b = req.body || {};
+  const costs = b.costs || (b.groups ? {} : b); // bare body = costs map (back-compat)
+  const nCosts = queue.setItemCosts(costs);
+  const nGroups = b.groups ? queue.setItemGroups(b.groups) : 0;
+  res.json({ ok: true, updated: nCosts, groupsUpdated: nGroups });
 });
 
 // Tentative profit for the current live stream.

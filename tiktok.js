@@ -363,6 +363,10 @@ export async function fetchCatalog() {
           ) || 0;
           const skuId = String(sku.id || sku.sku_id || '');
           if (!skuId) continue;
+          // Stock = total on-hand inventory across the SKU's warehouses. null when
+          // TikTok doesn't return inventory (so we don't falsely flag out-of-stock).
+          const inv = Array.isArray(sku.inventory) ? sku.inventory : [];
+          const stock = inv.length ? inv.reduce((n, w) => n + (Number(w.quantity) || 0), 0) : null;
           items.push({
             skuId,
             sellerSku: String(sku.seller_sku || sku.sku_id || ''),
@@ -373,6 +377,7 @@ export async function fetchCatalog() {
             price,
             currency: String(pr.currency || ''),
             status,
+            stock,
           });
         }
       }

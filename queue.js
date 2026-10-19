@@ -302,6 +302,7 @@ export class QueueEngine extends EventEmitter {
         prev.price = Number(it.price) || 0;
         prev.currency = it.currency || prev.currency;
         prev.status = it.status || prev.status;
+        if (it.stock !== undefined) prev.stock = it.stock; // refresh on-hand stock
         prev.lastSeen = now;
         if (prev.archived) { prev.archived = false; unarchived++; }
         updated++;
@@ -316,6 +317,8 @@ export class QueueEngine extends EventEmitter {
           price: Number(it.price) || 0,
           currency: it.currency || '',
           cost: null,
+          group: '', // user-assigned category (preserved across refreshes)
+          stock: (it.stock !== undefined ? it.stock : null),
           archived: false,
           firstSeen: now,
           lastSeen: now,
@@ -382,6 +385,23 @@ export class QueueEngine extends EventEmitter {
     }
     this._persistCatalog();
     this.emit('change', { reason: 'catalog-costs' });
+    return n;
+  }
+
+  /** Assign items to a category/group from { [skuId]: groupName }. Empty clears
+   *  the group (item becomes Ungrouped). Free-text label; the group list is simply
+   *  the set of distinct labels in use. */
+  setItemGroups(map) {
+    if (!map || typeof map !== 'object') return 0;
+    let n = 0;
+    for (const [id, v] of Object.entries(map)) {
+      const e = this.catalog[String(id)];
+      if (!e) continue;
+      e.group = String(v == null ? '' : v).trim().slice(0, 60);
+      n++;
+    }
+    this._persistCatalog();
+    this.emit('change', { reason: 'catalog-groups' });
     return n;
   }
 
