@@ -106,6 +106,13 @@
   .invv{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums}
   .invl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.4px;margin-top:2px}
   td.qty{text-align:right;font-variant-numeric:tabular-nums}
+  /* Parent product header + nested variant rows */
+  tr.prow td{background:#141a24;border-top:1px solid var(--line);padding:9px 10px}
+  .pname{font-weight:700;font-size:13.5px}
+  .pvar{color:var(--muted);font-size:11.5px;margin-left:6px}
+  tr.vrow td.vcell{padding-left:22px}
+  .vlabel{color:#cdd4e2;font-size:12.5px}
+  tr.vrow td{background:rgba(255,255,255,.015)}
   input.qtyin{width:68px;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:7px 9px;border-radius:8px;font-size:13px;text-align:right}
   input.qtyin.dirty{border-color:var(--accent)}
   .qtywrap{display:flex;align-items:center;gap:6px;justify-content:flex-end}
@@ -460,7 +467,7 @@
     var sub = (g.kind==='oos') ? ' <span class="gmeta">(auto)</span>' : (g.kind==='archived' ? ' <span class="gmeta">(delisted — kept for history)</span>' : '');
     var rm = (g.kind==='cat') ? '<span class="grm" title="Remove this category" onclick="removeCategory(\''+esc(g.gname).replace(/'/g,"&#39;")+'\')">✕</span>' : '';
     var gdh = (g.kind==='cat') ? '<span class="gdh" draggable="true" title="Drag to reorder categories">⠿</span>' : '';
-    var rows = g.items.length ? g.items.map(rowHtml).join('') : '<tr class="gempty"><td colspan="6">Drag items here</td></tr>';
+    var rows = g.items.length ? renderGroupRows(g.items) : '<tr class="gempty"><td colspan="6">Drag items here</td></tr>';
     var nameHtml = '<span class="gname">'+esc(g.label)+'</span>'
       + (g.kind==='cat' ? '<span class="gedit" title="Rename category" onclick="startRename(this,event)">✎</span>' : '');
     return '<div class="group '+(isColl?'collapsed':'')+(droppable?' droppable':'')+(g.kind==='cat'?' iscat':'')+'" data-key="'+esc(g.key)+'" data-gname="'+esc(g.gname)+'">'+
@@ -469,7 +476,40 @@
     '</div>';
   }
 
-  function rowHtml(c){
+  // Render a category's items, clustering multiple SKUs of the same product under a
+  // parent-product header row. Single-SKU products render as a normal row.
+  function renderGroupRows(items){
+    var order = [], byP = {};
+    items.forEach(function(c){
+      var p = c.productId ? ('p:'+c.productId) : ('s:'+c.skuId);
+      if(!byP[p]){ byP[p] = []; order.push(p); }
+      byP[p].push(c);
+    });
+    var html = '';
+    order.forEach(function(p){
+      var arr = byP[p];
+      if(arr.length <= 1){ html += rowHtml(arr[0], false); }
+      else { html += parentRowHtml(arr); arr.forEach(function(c){ html += rowHtml(c, true); }); }
+    });
+    return html;
+  }
+
+  function parentRowHtml(arr){
+    var name = arr[0].product || arr[0].name || 'Product';
+    var totalStock = arr.reduce(function(n,c){ var s=Number(c.stock); return n + (isFinite(s)&&s>0?s:0); }, 0);
+    var meta = arr.length + ' variants' + (totalStock? ' · '+totalStock+' on hand' : '');
+    return '<tr class="prow"><td></td><td colspan="5"><span class="pname">'+esc(name)+'</span> <span class="pvar">'+meta+'</span></td></tr>';
+  }
+
+  // A readable label for a variant when TikTok gives no variation name: its own
+  // variant text, else its price, else a short SKU suffix.
+  function variantLabel(c){
+    var v = (c.variant||'').trim(); if(v) return v;
+    if(Number(c.price) > 0) return money(c.price) + ' option';
+    return 'SKU …' + String(c.skuId).slice(-4);
+  }
+
+  function rowHtml(c, isVariant){
     var price = (c.price!=null && Number(c.price)>0) ? money(c.price) : '<span class="var">—</span>';
     var costVal = (c.cost!=null) ? Number(c.cost) : '';
     var groupVal = esc((c.group||'').trim());
@@ -490,9 +530,12 @@
     } else {
       qtyCell = (stockVal!=null ? stockVal : '<span class="var">—</span>');
     }
-    return '<tr data-sku="'+esc(c.skuId)+'" data-gname="'+groupVal+'"'+(c.archived?' class="arch"':'')+'>'+
+    var itemCell = isVariant
+      ? '<td class="vcell"><span class="vlabel">↳ '+esc(variantLabel(c))+'</span>'+badge+'</td>'
+      : '<td><span class="prod">'+esc(c.product||c.name||'Item')+'</span>'+badge+(c.variant?'<div class="var">'+esc(c.variant)+'</div>':'')+'</td>';
+    return '<tr data-sku="'+esc(c.skuId)+'" data-gname="'+groupVal+'" class="'+(isVariant?'vrow ':'')+(c.archived?'arch':'')+'">'+
       handle+
-      '<td><span class="prod">'+esc(c.product||c.name||'Item')+'</span>'+badge+(c.variant?'<div class="var">'+esc(c.variant)+'</div>':'')+'</td>'+
+      itemCell+
       '<td><input class="grp" list="groupList" data-sku="'+esc(c.skuId)+'" value="'+groupVal+'" placeholder="—" oninput="onGroup(this)"></td>'+
       '<td class="r num">'+price+'</td>'+
       '<td class="r qty">'+qtyCell+'</td>'+
