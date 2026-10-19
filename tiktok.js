@@ -436,8 +436,11 @@ export async function updateSkuInventory(productId, skuId, quantity, warehouseId
     if (!tokens.shopCipher) { try { await getShopCipher(); } catch (e) {} }
     const q = Math.max(0, Math.floor(Number(quantity) || 0));
     const whs = (Array.isArray(warehouseIds) && warehouseIds.length) ? warehouseIds : [];
+    // Write the quantity to the PRIMARY warehouse only (don't multiply it across
+    // every warehouse, which would inflate a multi-warehouse SKU, and don't zero
+    // the others). Virtually all of these items are single-warehouse.
     const inv = whs.length
-      ? whs.map((w) => ({ warehouse_id: String(w), quantity: q }))
+      ? [{ warehouse_id: String(whs[0]), quantity: q }]
       : [{ quantity: q }];
     const body = await apiCall(
       'POST',
