@@ -460,25 +460,23 @@ export async function debugRawOrder(idSuffix) {
   const statuses = ['AWAITING_SHIPMENT', 'AWAITING_COLLECTION', 'UNPAID', 'COMPLETED', 'CANCELLED'];
   let sampleId = null;
   if (idSuffix) {
-    // Look up a SPECIFIC order by the tail of its id (last N digits). Search a
-    // wide window and paginate deep so a past-stream order is reliably found.
+    // Look up a SPECIFIC order by the tail of its id (last N digits). Search with
+    // NO status filter so it's found regardless of fulfillment state, paginating
+    // deep over a wide window.
     const suf = String(idSuffix);
     const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 14; // ~2 weeks
-    outer:
-    for (const st of statuses) {
-      let pageToken = '';
-      for (let page = 0; page < 30; page++) {
-        const extra = { page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) };
-        const b = await apiCall('POST', `/order/${API_VERSION}/orders/search`,
-          extra, { create_time_ge: since, order_status: st }).catch(() => null);
-        const orders = b?.data?.orders || [];
-        const hit = orders.find((o) => String(o.id || o.order_id || '').endsWith(suf));
-        if (hit) { sampleId = hit.id || hit.order_id; break outer; }
-        pageToken = b?.data?.next_page_token || '';
-        if (!pageToken) break;
-      }
+    let pageToken = '';
+    for (let page = 0; page < 50; page++) {
+      const extra = { page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) };
+      const b = await apiCall('POST', `/order/${API_VERSION}/orders/search`,
+        extra, { create_time_ge: since }).catch(() => null);
+      const orders = b?.data?.orders || [];
+      const hit = orders.find((o) => String(o.id || o.order_id || '').endsWith(suf));
+      if (hit) { sampleId = hit.id || hit.order_id; break; }
+      pageToken = b?.data?.next_page_token || '';
+      if (!pageToken) break;
     }
-    if (!sampleId) return { ok: false, note: 'No order ending in ' + suf + ' found in the last 14 days.' };
+    if (!sampleId) return { ok: false, note: 'No order ending in ' + suf + ' found (all statuses, last 14 days).' };
   } else {
     const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30;
     for (const st of statuses) {
