@@ -547,8 +547,8 @@ app.post('/api/tiktok-refetch', requireAuth, async (_req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 // Debug: inspect one raw order's handle-ish fields to confirm the username key (admin only).
-app.get('/api/tiktok-raw-order', requireAuth, async (req, res) => {
-  try { res.json(await debugRawOrder(req.query.id)); }
+app.get('/api/tiktok-raw-order', requireAuth, async (_req, res) => {
+  try { res.json(await debugRawOrder()); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 // Debug: probe whether this shop can read buyer cancellation requests (admin only).

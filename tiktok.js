@@ -456,62 +456,46 @@ export async function updateSkuInventory(productId, skuId, quantity, warehouseId
 // Admin-only inspector: fetch one raw order and surface any handle-ish fields so
 // we can confirm which key TikTok actually populates with the public username.
 // Real names (recipient_address.name/phone/address) are redacted before return.
-export async function debugRawOrder(idSuffix) {
+export async function debugRawOrder() {
   const statuses = ['AWAITING_SHIPMENT', 'AWAITING_COLLECTION', 'UNPAID', 'COMPLETED', 'CANCELLED'];
+  const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30; // last 30 days
   let sampleId = null;
-  if (idSuffix) {
-    // Look up a SPECIFIC order by the tail of its id (last N digits). Search with
-    // NO status filter so it's found regardless of fulfillment state, paginating
-    // deep over a wide window.
-    const suf = String(idSuffix);
-    const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 14; // ~2 weeks
-    let pageToken = '';
-    for (let page = 0; page < 50; page++) {
-      const extra = { page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) };
-      const b = await apiCall('POST', `/order/${API_VERSION}/orders/search`,
-        extra, { create_time_ge: since }).catch(() => null);
-      const orders = b?.data?.orders || [];
-      const hit = orders.find((o) => String(o.id || o.order_id || '').endsWith(suf));
-      if (hit) { sampleId = hit.id || hit.order_id; break; }
-      pageToken = b?.data?.next_page_token || '';
-      if (!pageToken) break;
-    }
-    if (!sampleId) return { ok: false, note: 'No order ending in ' + suf + ' found (all statuses, last 14 days).' };
-  } else {
-    const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30;
-    for (const st of statuses) {
-      const ids = await searchOrderIds(since, st).catch(() => []);
-      if (ids && ids.length) { sampleId = ids[0]; break; }
-    }
-    if (!sampleId) return { ok: false, note: 'No orders found in the last 30 days to inspect.' };
+  for (const st of statuses) {
+    const ids = await searchOrderIds(since, st).catch(() => []);
+    if (ids && ids.length) { sampleId = ids[0]; break; }
   }
+  if (!sampleId) return { ok: false, note: 'No orders found in the last 30 days to inspect.' };
 
   const body = await apiCall('GET', `/order/${API_VERSION}/orders`, { ids: sampleId });
   const order = body?.data?.orders?.[0];
   if (!order) return { ok: false, note: 'Order detail came back empty.', raw: JSON.stringify(body).slice(0, 300) };
 
-  // Mask only hard PII (shipping/contact). Buyer identity fields (nickname,
-  // username, display name, message, ids) stay VISIBLE so we can see exactly
-  // what the API carries for this buyer.
-  const piiKey = /phone|email|zip|postal|region|state|city|address|line|full_address|first_name|last_name|street|house|detail|district|town|recipient|tax|^name$/i;
-  const mask = (v) => { if (v == null) return v; const s = String(v); return s ? s[0] + '***(' + s.length + ')' : s; };
-  const flat = {};
-  const walk = (obj, prefix = '') => {
-    if (obj == null) return;
-    if (Array.isArray(obj)) { obj.forEach((v, i) => walk(v, `${prefix}[${i}]`)); return; }
-    if (typeof obj === 'object') { for (const [k, v] of Object.entries(obj)) walk(v, prefix ? `${prefix}.${k}` : k); return; }
-    const key = String(prefix).split(/[.[]/).pop();
-    flat[prefix] = piiKey.test(key) ? mask(obj) : obj;
+  // Redact obvious PII so this route never leaks a real name/address.
+  const redactKeys = /name|phone|email|address|zip|postal|region|state|city|line|full_address/i;
+  const mask = (v) => {
+    if (v == null) return v;
+    const s = String(v);
+    return s ? s[0] + '***(' + s.length + ')' : s;
   };
-  walk(order);
+  const handleish = {};
+  const scan = (obj, prefix = '') => {
+    if (!obj || typeof obj !== 'object') return;
+    for (const [k, v] of Object.entries(obj)) {
+      const path = prefix ? `${prefix}.${k}` : k;
+      if (v && typeof v === 'object' && !Array.isArray(v)) { scan(v, path); continue; }
+      if (/user|name|nick|handle|display|buyer|account/i.test(k)) {
+        handleish[path] = redactKeys.test(k) ? mask(v) : v;
+      }
+    }
+  };
+  scan(order);
 
   return {
     ok: true,
     sampleOrderId: sampleId,
     topLevelKeys: Object.keys(order),
-    allFields: flat,
+    handleishFields: handleish,
     normalizedBuyer: normalizeOrder(order).buyer,
-    normalizedHandle: normalizeOrder(order).buyerHandle || '(empty)',
   };
 }
 
