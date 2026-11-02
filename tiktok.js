@@ -456,47 +456,64 @@ export async function updateSkuInventory(productId, skuId, quantity, warehouseId
 // Admin-only inspector: fetch one raw order and surface any handle-ish fields so
 // we can confirm which key TikTok actually populates with the public username.
 // Real names (recipient_address.name/phone/address) are redacted before return.
-export async function debugRawOrder() {
-  const statuses = ['AWAITING_SHIPMENT', 'AWAITING_COLLECTION', 'UNPAID', 'COMPLETED', 'CANCELLED'];
-  const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30; // last 30 days
+export async function debugRawOrder(idSuffix) {
+  // 1) Resolve a full order id (by suffix via 202309 search, else newest order).
+  const statuses = ['AWAITING_SHIPMENT', 'AWAITING_COLLECTION', 'UNPAID', 'COMPLETED', 'CANCELLED', 'DELIVERED', 'IN_TRANSIT'];
   let sampleId = null;
-  for (const st of statuses) {
-    const ids = await searchOrderIds(since, st).catch(() => []);
-    if (ids && ids.length) { sampleId = ids[0]; break; }
-  }
-  if (!sampleId) return { ok: false, note: 'No orders found in the last 30 days to inspect.' };
-
-  const body = await apiCall('GET', `/order/${API_VERSION}/orders`, { ids: sampleId });
-  const order = body?.data?.orders?.[0];
-  if (!order) return { ok: false, note: 'Order detail came back empty.', raw: JSON.stringify(body).slice(0, 300) };
-
-  // Redact obvious PII so this route never leaks a real name/address.
-  const redactKeys = /name|phone|email|address|zip|postal|region|state|city|line|full_address/i;
-  const mask = (v) => {
-    if (v == null) return v;
-    const s = String(v);
-    return s ? s[0] + '***(' + s.length + ')' : s;
-  };
-  const handleish = {};
-  const scan = (obj, prefix = '') => {
-    if (!obj || typeof obj !== 'object') return;
-    for (const [k, v] of Object.entries(obj)) {
-      const path = prefix ? `${prefix}.${k}` : k;
-      if (v && typeof v === 'object' && !Array.isArray(v)) { scan(v, path); continue; }
-      if (/user|name|nick|handle|display|buyer|account/i.test(k)) {
-        handleish[path] = redactKeys.test(k) ? mask(v) : v;
-      }
+  if (idSuffix) {
+    const suf = String(idSuffix);
+    const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 14;
+    let pageToken = '';
+    for (let page = 0; page < 50; page++) {
+      const extra = { page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) };
+      const b = await apiCall('POST', `/order/202309/orders/search`, extra, { create_time_ge: since }).catch(() => null);
+      const orders = b?.data?.orders || [];
+      const hit = orders.find((o) => String(o.id || o.order_id || '').endsWith(suf));
+      if (hit) { sampleId = hit.id || hit.order_id; break; }
+      pageToken = b?.data?.next_page_token || '';
+      if (!pageToken) break;
     }
-  };
-  scan(order);
+    if (!sampleId) return { ok: false, note: 'No order ending in ' + suf + ' found (all statuses, last 14 days).' };
+  } else {
+    const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30;
+    for (const st of statuses) {
+      const ids = await searchOrderIds(since, st).catch(() => []);
+      if (ids && ids.length) { sampleId = ids[0]; break; }
+    }
+    if (!sampleId) return { ok: false, note: 'No orders found to inspect.' };
+  }
 
-  return {
-    ok: true,
-    sampleOrderId: sampleId,
-    topLevelKeys: Object.keys(order),
-    handleishFields: handleish,
-    normalizedBuyer: normalizeOrder(order).buyer,
+  // 2) Pull the SAME order under several API versions and surface every
+  //    buyer/name/handle-ish field from each, so we can see if any version still
+  //    returns the buyer's @username. Hard PII (recipient/phone/email/address)
+  //    stays masked; nickname/username/display stay visible.
+  const versions = ['202309', '202405', '202407', '202409', '202502'];
+  const piiKey = /phone|email|zip|postal|region|state|city|address|line|full_address|first_name|last_name|street|house|detail|district|town|recipient|tax|^name$/i;
+  const mask = (v) => { if (v == null) return v; const s = String(v); return s ? s[0] + '***(' + s.length + ')' : s; };
+  const scanIdent = (order) => {
+    const out = {};
+    const walk = (o, p = '') => {
+      if (o == null) return;
+      if (Array.isArray(o)) { o.forEach((x, i) => walk(x, `${p}[${i}]`)); return; }
+      if (typeof o === 'object') { for (const [k, v] of Object.entries(o)) walk(v, p ? `${p}.${k}` : k); return; }
+      const key = String(p).split(/[.[]/).pop();
+      if (/user|name|nick|handle|display|buyer|account/i.test(key)) out[p] = piiKey.test(key) ? mask(o) : o;
+    };
+    walk(order);
+    return out;
   };
+
+  const perVersion = {};
+  for (const v of versions) {
+    try {
+      const b = await apiCall('GET', `/order/${v}/orders`, { ids: sampleId });
+      const order = b?.data?.orders?.[0];
+      if (!order) { perVersion[v] = { ok: false, note: 'empty/err', raw: (JSON.stringify(b) || '').slice(0, 160) }; continue; }
+      perVersion[v] = { ok: true, topLevelKeys: Object.keys(order), identFields: scanIdent(order) };
+    } catch (e) { perVersion[v] = { ok: false, error: e.message }; }
+  }
+
+  return { ok: true, sampleOrderId: sampleId, perVersion };
 }
 
 // Admin-only probe: can this shop's authorization read buyer cancellation
